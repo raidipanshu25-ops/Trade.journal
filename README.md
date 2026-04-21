@@ -1,4 +1,4 @@
-# 📈 MT5 Trading Journal & AI Assistant
+# 📈 Trade.journal & AI Assistant
 
 A powerful, fully-automated trading dashboard connecting MetaTrader 5 (MT5) with intelligent risk management, real-time analytics, and AI-powered performance coaching. 
 
