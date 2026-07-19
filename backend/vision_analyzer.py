@@ -1,14 +1,14 @@
 """
 Vision AI service — Two-pass pipeline:
-  Pass 1: Llama 3.2 90B Vision reads the chart image → raw SMC narrative
-  Pass 2: Kimi 2.5 text model takes that narrative → structured entry coaching JSON
+  Pass 1: Llama 3.2 90B Vision reads the chart image → raw SMC narrative (NVIDIA NIM)
+  Pass 2: Z.ai text model (GLM 5.2) takes that narrative → structured entry coaching JSON
 """
 import logging
 import asyncio
 import json
 import re
 from openai import OpenAI
-from config import NVIDIA_API_KEY
+from config import NVIDIA_API_KEY, ZAI_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -135,27 +135,42 @@ CRITICAL RULES:
 
 
 class VisionAnalyzer:
-    """Two-pass chart analysis: Vision reads → Text model coaches."""
+    """Two-pass chart analysis: Vision reads (NVIDIA) → Z.ai coaches."""
 
     VISION_MODEL = "meta/llama-3.2-90b-vision-instruct"
-    COACHING_MODEL = "moonshotai/kimi-k2-instruct"
-    BASE_URL = "https://integrate.api.nvidia.com/v1"
+    COACHING_MODEL = "glm-5.2"
+    VISION_BASE_URL = "https://integrate.api.nvidia.com/v1"
+    COACHING_BASE_URL = "https://api.z.ai/api/paas/v4/"
 
     def __init__(self, api_key: str = ""):
-        self._api_key = api_key or NVIDIA_API_KEY
-        self._client = None
-        if self._api_key and self._api_key.startswith("nvapi-"):
+        self._nvidia_key = api_key or NVIDIA_API_KEY
+        self._zai_key = ZAI_API_KEY
+        self._vision_client = None
+        self._coaching_client = None
+
+        # Vision client (NVIDIA NIM for Llama Vision)
+        if self._nvidia_key and self._nvidia_key.startswith("nvapi-"):
             try:
-                self._client = OpenAI(
-                    api_key=self._api_key,
-                    base_url=self.BASE_URL,
+                self._vision_client = OpenAI(
+                    api_key=self._nvidia_key,
+                    base_url=self.VISION_BASE_URL,
                 )
             except Exception as e:
                 logger.error(f"Failed to initialize Vision AI client: {e}")
 
+        # Coaching client (Z.ai for structured analysis)
+        if self._zai_key:
+            try:
+                self._coaching_client = OpenAI(
+                    api_key=self._zai_key,
+                    base_url=self.COACHING_BASE_URL,
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize Z.ai coaching client: {e}")
+
     @property
     def is_available(self) -> bool:
-        return self._client is not None
+        return self._vision_client is not None and self._coaching_client is not None
 
     async def analyze_chart(self, image_base64: str, context: str = "",
                             symbol: str = "", timeframe: str = "") -> dict:
@@ -178,7 +193,7 @@ class VisionAnalyzer:
             logger.info(f"Vision Pass 1 complete: {len(vision_text)} chars of analysis")
 
             # ─── PASS 2: Coaching model generates structured JSON ──
-            logger.info("Vision Pass 2: Generating entry coaching with Kimi 2.5...")
+            logger.info("Vision Pass 2: Generating entry coaching with Z.ai...")
             analysis = await self._pass2_coaching(vision_text, symbol, timeframe, context)
             
             analysis["status"] = "done"
@@ -202,7 +217,7 @@ class VisionAnalyzer:
             user_text += f" Trader's note: {context}"
 
         def _call():
-            return self._client.chat.completions.create(
+            return self._vision_client.chat.completions.create(
                 model=self.VISION_MODEL,
                 messages=[
                     {"role": "system", "content": VISION_READ_PROMPT},
@@ -228,7 +243,7 @@ class VisionAnalyzer:
 
     async def _pass2_coaching(self, vision_analysis: str, symbol: str,
                                timeframe: str, context: str) -> dict:
-        """Pass 2: Feed vision output to Kimi 2.5 for structured coaching."""
+        """Pass 2: Feed vision output to Z.ai for structured coaching."""
         prompt = COACHING_PROMPT.format(
             vision_analysis=vision_analysis,
             symbol=symbol or "Unknown",
@@ -237,7 +252,7 @@ class VisionAnalyzer:
         )
 
         def _call():
-            return self._client.chat.completions.create(
+            return self._coaching_client.chat.completions.create(
                 model=self.COACHING_MODEL,
                 messages=[
                     {"role": "system", "content": "You are AXIOM, an elite SMC trading coach. Return ONLY valid JSON."},

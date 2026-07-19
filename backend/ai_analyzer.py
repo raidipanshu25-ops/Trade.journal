@@ -1,11 +1,11 @@
 """
-AI Analysis service using Moonshot AI (Kimi 2.5).
+AI Analysis service using Z.ai (GLM 5.2).
 Provides professional trading analysis and coaching feedback.
 """
 import logging
 import asyncio
 from openai import OpenAI
-from config import NVIDIA_API_KEY
+from config import ZAI_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,18 @@ You ground your analysis in the combined wisdom of the best trading psychologist
 - **Overconfidence Bias:** Increasing size after a winning streak. Taking more trades than the system allows because "I'm in the zone."
 - **Gambler's Fallacy:** "I've lost 3 in a row, the next one HAS to be a winner." You detect this in trade frequency patterns.
 - **Recency Bias:** Letting today's results override the statistical reality of the weekly/overall track record.
+
+---
+
+## Fractional Entry Risk Management
+The trader operates under a specific risk management protocol regarding position sizing. They DO NOT deploy the full quantity at once. Instead, they deploy 40% to 60% of the full quantity on the initial entry.
+- If the market hits Take Profit (TP), they are satisfied.
+- If the market reverses and gives a chance to enter again at a better or equal price, they deploy the remaining quantity.
+You MUST evaluate if they are following this. 
+"Full quantity" definitions:
+- XAUUSD: 0.05 to 0.06 lots
+- Forex pairs: 0.40 to 0.50 lots
+If they deploy the full quantity on a single initial trade, you must call it out as a violation of their risk management protocol.
 
 ---
 
@@ -174,19 +186,19 @@ After the grade, close with a short personal sign-off — 2–3 sentences, no he
 
 
 class AIAnalyzer:
-    """Wraps the Moonshot AI (Kimi 2.5) API for trade analysis."""
+    """Wraps the Z.ai API (GLM 5.2) for trade analysis."""
 
     def __init__(self, api_key: str = ""):
-        self._api_key = api_key or NVIDIA_API_KEY
+        self._api_key = api_key or ZAI_API_KEY
         self._client = None
-        if self._api_key and self._api_key.startswith("nvapi-"):
+        if self._api_key:
             try:
                 self._client = OpenAI(
                     api_key=self._api_key,
-                    base_url="https://integrate.api.nvidia.com/v1",
+                    base_url="https://api.z.ai/api/paas/v4/",
                 )
             except Exception as e:
-                logger.error(f"Failed to initialize NVIDIA NIM client: {e}")
+                logger.error(f"Failed to initialize Z.ai client: {e}")
 
     @property
     def is_available(self) -> bool:
@@ -205,7 +217,7 @@ class AIAnalyzer:
         today_trades_from_db: list[dict] = None,
         advanced_analytics: dict = None,
     ) -> str:
-        """Send trading data to Kimi 2.5 and return the analysis."""
+        """Send trading data to Z.ai and return the analysis."""
         if not self.is_available:
             return self._fallback_analysis(daily_stats, alerts)
 
@@ -223,19 +235,19 @@ class AIAnalyzer:
             # Run synchronous OpenAI call in a thread to avoid blocking the event loop
             def _call_api():
                 return self._client.chat.completions.create(
-                    model="moonshotai/kimi-k2.5",
+                    model="glm-5.2",
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_content},
                     ],
                     temperature=0.6,
-                    max_tokens=4096,
+                    max_tokens=8192,
                 )
 
             response = await asyncio.to_thread(_call_api)
             return response.choices[0].message.content
         except Exception as e:
-            logger.error(f"NVIDIA NIM / Kimi API error: {e}")
+            logger.error(f"Z.ai API error: {e}")
             return self._fallback_analysis(daily_stats, alerts)
 
     # ------------------------------------------------------------------
@@ -821,11 +833,11 @@ class AIAnalyzer:
         lines.extend([
             "",
             "## 💡 Recommendations",
-            "- Connect your Moonshot AI (Kimi 2.5) API key for detailed AI-powered analysis.",
+            "- Connect your Z.ai API key for detailed AI-powered analysis.",
             "- Review your rule configuration in Settings.",
             "",
             f"## 🏆 Score: {score}/100",
             "",
-            "*This is a basic analysis. Add your Kimi API key in Settings for professional AI coaching.*"
+            "*This is a basic analysis. Add your Z.ai API key in Settings for professional AI coaching.*"
         ])
         return "\n".join(lines)

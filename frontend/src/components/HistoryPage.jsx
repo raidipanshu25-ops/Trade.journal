@@ -125,24 +125,24 @@ export function HistoryPage({ mt5Connected, historyUpdatedCounter }) {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Ticket</th>
+                  <th>Order ID</th>
                   <th>Close Time</th>
                   <th>Symbol</th>
                   <th>Type</th>
                   <th style={{ textAlign: 'right' }}>Size</th>
                   <th style={{ textAlign: 'right' }}>Open/Close</th>
                   <th style={{ textAlign: 'right' }}>Duration</th>
-                  <th style={{ textAlign: 'right' }}>Net P&L</th>
+                  <th style={{ textAlign: 'right' }}>Profit</th>
                 </tr>
               </thead>
               <tbody>
                 {trades.map(trade => {
-                  const net = trade.profit + (trade.commission || 0) + (trade.swap || 0);
+                  const commSwap = (trade.commission || 0) + (trade.swap || 0);
 
                   return (
-                    <tr key={trade.ticket}>
+                    <tr key={trade.position_id || trade.ticket}>
                       <td style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text-2)' }}>
-                        #{trade.ticket}
+                        #{trade.position_id || trade.ticket}
                       </td>
                       <td>
                         <div style={{ fontSize: '0.8rem', color: 'var(--text-0)' }}>{trade.date}</div>
@@ -177,11 +177,16 @@ export function HistoryPage({ mt5Connected, historyUpdatedCounter }) {
                       </td>
                       <td style={{ 
                         textAlign: 'right',
-                        fontWeight: 700,
                         fontFamily: 'var(--mono)',
-                        color: net > 0 ? 'var(--green-bright)' : net < 0 ? 'var(--red-bright)' : 'var(--text-1)'
                       }}>
-                        {net > 0 ? '+' : ''}{net.toFixed(2)}
+                        <span style={{ fontWeight: 700, color: trade.profit > 0 ? 'var(--green-bright)' : trade.profit < 0 ? 'var(--red-bright)' : 'var(--text-1)' }}>
+                          {trade.profit > 0 ? '+' : ''}{trade.profit.toFixed(2)}
+                        </span>
+                        {commSwap !== 0 && (
+                          <span style={{ fontSize: '0.72rem', fontWeight: 400, color: 'var(--text-2)', marginLeft: '6px' }}>
+                            ({commSwap.toFixed(2)})
+                          </span>
+                        )}
                       </td>
                     </tr>
                   );

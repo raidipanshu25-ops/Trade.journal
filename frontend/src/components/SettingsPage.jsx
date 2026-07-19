@@ -1,88 +1,95 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api';
+import { ProfileSection } from './ProfileSection';
 
 /* ════════════════════════════════════════════════
-   Background Presets
+   Theme Presets
    ════════════════════════════════════════════════ */
 
-const BG_PRESETS = [
+const THEME_PRESETS = [
   {
-    id: 'solid',
-    label: 'Solid',
-    desc: 'Clean flat background',
+    id: 'terminal-teal',
+    name: 'Terminal Teal',
+    desc: 'FundingPips-inspired',
+    accent: '#00D9A3',
+    accentDark: '#00B88A',
+    bgBase: '#0A0E14',
+    bgSurface: '#111722',
+    bgRaised: '#161D2B',
+    borderColor: '#232B3A',
+    textPrimary: '#F2F5F9',
+    textSecondary: '#8A93A6',
+    profit: '#22C55E',
+    loss: '#F43F5E',
   },
   {
-    id: 'mesh',
-    label: 'Gradient Mesh',
-    desc: 'Ambient color wash',
+    id: 'obsidian-gold',
+    name: 'Obsidian Gold',
+    desc: 'GoatFundedTrader-inspired',
+    accent: '#D4A24C',
+    accentDark: '#B8892E',
+    bgBase: '#0B0A0A',
+    bgSurface: '#141211',
+    bgRaised: '#1C1917',
+    borderColor: '#2A2622',
+    textPrimary: '#F5F1E8',
+    textSecondary: '#9C9385',
+    profit: '#34D399',
+    loss: '#FB7185',
   },
   {
-    id: 'dots',
-    label: 'Dot Grid',
-    desc: 'Subtle dot pattern',
-  },
-  {
-    id: 'aurora',
-    label: 'Aurora',
-    desc: 'Northern-lights glow',
+    id: 'violet-aurora',
+    name: 'Violet Aurora',
+    desc: 'Maven-inspired',
+    accent: '#8B5CF6',
+    accentDark: '#7C3AED',
+    bgBase: '#0D0B14',
+    bgSurface: '#14111F',
+    bgRaised: '#1C1830',
+    borderColor: '#2A2440',
+    textPrimary: '#F3F1FA',
+    textSecondary: '#948DA8',
+    profit: '#10B981',
+    loss: '#EF4444',
   },
 ];
 
-function getBgCSS(id) {
-  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-  switch (id) {
-    case 'mesh':
-      return {
-        image: isDark
-          ? `radial-gradient(ellipse at 20% 50%, rgba(34,211,238,0.12) 0%, transparent 50%),
-             radial-gradient(ellipse at 80% 20%, rgba(59,130,246,0.10) 0%, transparent 50%),
-             radial-gradient(ellipse at 60% 80%, rgba(168,85,247,0.08) 0%, transparent 50%)`
-          : `radial-gradient(ellipse at 20% 50%, rgba(8,145,178,0.08) 0%, transparent 50%),
-             radial-gradient(ellipse at 80% 20%, rgba(37,99,235,0.06) 0%, transparent 50%),
-             radial-gradient(ellipse at 60% 80%, rgba(139,92,246,0.05) 0%, transparent 50%)`,
-        size: '100% 100%, 100% 100%, 100% 100%',
-      };
-    case 'dots':
-      return {
-        image: isDark
-          ? `radial-gradient(rgba(255,255,255,0.12) 1px, transparent 1px)`
-          : `radial-gradient(rgba(0,0,0,0.08) 1px, transparent 1px)`,
-        size: '24px 24px',
-      };
-    case 'aurora':
-      return {
-        image: `radial-gradient(ellipse at 10% 80%, rgba(34,211,238,0.14) 0%, transparent 40%),
-             radial-gradient(ellipse at 50% 10%, rgba(168,85,247,0.14) 0%, transparent 40%),
-             radial-gradient(ellipse at 90% 70%, rgba(59,130,246,0.14) 0%, transparent 40%),
-             radial-gradient(ellipse at 40% 50%, rgba(16,185,129,0.08) 0%, transparent 50%)`,
-        size: '100% 100%, 100% 100%, 100% 100%, 100% 100%',
-      };
-    case 'solid':
-    default:
-      return { image: 'none', size: 'auto', color: '' };
+/* ════════════════════════════════════════════════
+   Color Utilities
+   ════════════════════════════════════════════════ */
+
+function hexToHSL(hex) {
+  let r = parseInt(hex.slice(1, 3), 16) / 255;
+  let g = parseInt(hex.slice(3, 5), 16) / 255;
+  let b = parseInt(hex.slice(5, 7), 16) / 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0, s = 0, l = (max + min) / 2;
+
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+      case g: h = ((b - r) / d + 2) / 6; break;
+      case b: h = ((r - g) / d + 4) / 6; break;
+    }
   }
+  return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
 }
 
-export function applyBgPreset(id, theme) {
-  const bg = getBgCSS(id, theme);
-  document.body.style.backgroundImage = bg.image;
-  document.body.style.backgroundSize = bg.size;
-  document.body.style.backgroundColor = bg.color || '';
-  document.body.style.backgroundAttachment = 'fixed';
-  localStorage.setItem('tj-bg', id);
-};
-
-/* ════════════════════════════════════════════════
-   Accent Color Presets
-   ════════════════════════════════════════════════ */
-
-const ACCENT_PRESETS = [
-  { id: 'cyan',    label: 'Cyan',    color: '#22d3ee', dark: '#06b6d4' },
-  { id: 'blue',    label: 'Blue',    color: '#3b82f6', dark: '#2563eb' },
-  { id: 'violet',  label: 'Violet',  color: '#8b5cf6', dark: '#7c3aed' },
-  { id: 'emerald', label: 'Emerald', color: '#10b981', dark: '#059669' },
-  { id: 'rose',    label: 'Rose',    color: '#f43f5e', dark: '#e11d48' },
-];
+function hslToHex(h, s, l) {
+  s /= 100;
+  l /= 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => {
+    const k = (n + h / 30) % 12;
+    const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * color).toString(16).padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
 
 function hexToRgb(hex) {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -91,109 +98,131 @@ function hexToRgb(hex) {
   return `${r},${g},${b}`;
 }
 
-export function applyAccentPreset(idOrHex) {
-  let color = idOrHex;
-  let dark = idOrHex;
-  const preset = ACCENT_PRESETS.find(p => p.id === idOrHex);
-  if (preset) {
-    color = preset.color;
-    dark = preset.dark;
-    localStorage.setItem('tj-accent', preset.id);
-  } else if (idOrHex && idOrHex.startsWith('#')) {
-    localStorage.setItem('tj-accent', idOrHex);
-  } else {
+/* ════════════════════════════════════════════════
+   applyThemePreset — the new unified function
+   ════════════════════════════════════════════════ */
+
+export function applyThemePreset(presetId) {
+  if (!presetId) presetId = 'terminal-teal';
+
+  const el = document.documentElement;
+
+  // Clear any lingering inline body background styles from the old system
+  document.body.style.backgroundImage = '';
+  document.body.style.backgroundSize = '';
+  document.body.style.backgroundColor = '';
+  document.body.style.backgroundAttachment = '';
+
+  // Backward compat: dark / light passthrough
+  if (presetId === 'dark' || presetId === 'light') {
+    el.setAttribute('data-theme', presetId);
+    localStorage.setItem('tj-preset', presetId);
+    localStorage.setItem('tj-theme', presetId);
+    // Clear any custom inline CSS vars so the stylesheet defaults take over
+    const varsToClear = [
+      '--bg-0', '--bg-1', '--bg-2', '--bg-3', '--border',
+      '--cyan', '--cyan-dark', '--cyan-dim', '--cyan-dim2', '--cyan-border',
+      '--cyan-glow', '--cyan-glow-sm', '--gradient-accent', '--gradient-accent-hover', '--gradient-brand',
+      '--text-0', '--text-1', '--text-2',
+      '--green', '--red',
+    ];
+    varsToClear.forEach(v => el.style.removeProperty(v));
     return;
   }
-  const el = document.documentElement;
-  const rgb = hexToRgb(color);
-  el.style.setProperty('--cyan', color);
-  el.style.setProperty('--cyan-dark', dark);
-  el.style.setProperty('--cyan-dim', `rgba(${rgb}, 0.06)`);
-  el.style.setProperty('--cyan-dim2', `rgba(${rgb}, 0.09)`);
-  el.style.setProperty('--cyan-border', `rgba(${rgb}, 0.14)`);
-  el.style.setProperty('--cyan-glow', `0 0 16px rgba(${rgb}, 0.2), 0 0 32px rgba(${rgb}, 0.06)`);
-  el.style.setProperty('--cyan-glow-sm', `0 0 8px rgba(${rgb}, 0.18)`);
-  el.style.setProperty('--gradient-accent', `linear-gradient(135deg, ${color} 0%, ${dark} 100%)`);
-  el.style.setProperty('--gradient-accent-hover', `linear-gradient(135deg, ${dark} 0%, ${dark} 100%)`);
-  el.style.setProperty('--gradient-brand', `linear-gradient(135deg, ${color}, ${dark})`);
-}
 
-/* ════════════════════════════════════════════════
-   Text Color Presets
-   ════════════════════════════════════════════════ */
+  // Custom preset — derive from saved base color
+  if (presetId === 'custom') {
+    const baseHex = localStorage.getItem('tj-custom-base') || '#00D9A3';
+    const { h, s, l } = hexToHSL(baseHex);
 
-const TEXT_PRESETS_DARK = [
-  { id: 'default',  label: 'Default',       text0: '#f4f4f5', text1: '#a1a1aa', text2: '#71717a' },
-  { id: 'bright',   label: 'High Contrast', text0: '#ffffff', text1: '#d4d4d8', text2: '#a1a1aa' },
-  { id: 'warm',     label: 'Warm',          text0: '#fef3c7', text1: '#d4a574', text2: '#92704a' },
-  { id: 'cool',     label: 'Cool',          text0: '#e0f2fe', text1: '#93c5fd', text2: '#60a5fa' },
-];
+    const bgBase = hslToHex(h, Math.min(s, 15), Math.max(l, 5));
+    const bgSurface = hslToHex(h, Math.min(s, 15), Math.max(l, 5) + 4);
+    const bgRaised = hslToHex(h, Math.min(s, 15), Math.max(l, 5) + 8);
+    const borderHex = hslToHex(h, Math.min(s, 15), Math.max(l, 5) + 12);
 
-const TEXT_PRESETS_LIGHT = [
-  { id: 'default',  label: 'Default',       text0: '#09090b', text1: '#3f3f46', text2: '#71717a' },
-  { id: 'bright',   label: 'High Contrast', text0: '#000000', text1: '#18181b', text2: '#3f3f46' },
-  { id: 'warm',     label: 'Warm',          text0: '#451a03', text1: '#78350f', text2: '#92400e' },
-  { id: 'cool',     label: 'Cool',          text0: '#0c4a6e', text1: '#075985', text2: '#0369a1' },
-];
+    const rgb = hexToRgb(baseHex);
 
-export function applyTextPreset(idOrHex, theme) {
-  const presets = theme === 'light' ? TEXT_PRESETS_LIGHT : TEXT_PRESETS_DARK;
-  let text0 = idOrHex;
-  let text1 = idOrHex;
-  let text2 = idOrHex;
+    el.setAttribute('data-theme', 'dark');
+    localStorage.setItem('tj-preset', 'custom');
+    localStorage.setItem('tj-theme', 'custom');
 
-  const preset = presets.find(p => p.id === idOrHex);
-  if (preset) {
-    text0 = preset.text0;
-    text1 = preset.text1;
-    text2 = preset.text2;
-    localStorage.setItem('tj-text', preset.id);
-  } else if (idOrHex && idOrHex.startsWith('#')) {
-    localStorage.setItem('tj-text', idOrHex);
-  } else {
-    const defaultPreset = presets[0];
-    text0 = defaultPreset.text0;
-    text1 = defaultPreset.text1;
-    text2 = defaultPreset.text2;
-    localStorage.setItem('tj-text', 'default');
+    el.style.setProperty('--bg-0', bgBase);
+    el.style.setProperty('--bg-1', bgSurface);
+    el.style.setProperty('--bg-2', bgRaised);
+    el.style.setProperty('--bg-3', borderHex);
+    el.style.setProperty('--border', borderHex);
+
+    el.style.setProperty('--cyan', baseHex);
+    el.style.setProperty('--cyan-dark', hslToHex(h, s, Math.max(l - 10, 10)));
+    el.style.setProperty('--cyan-dim', `rgba(${rgb}, 0.06)`);
+    el.style.setProperty('--cyan-dim2', `rgba(${rgb}, 0.09)`);
+    el.style.setProperty('--cyan-border', `rgba(${rgb}, 0.14)`);
+    el.style.setProperty('--cyan-glow', `0 0 16px rgba(${rgb}, 0.2), 0 0 32px rgba(${rgb}, 0.06)`);
+    el.style.setProperty('--cyan-glow-sm', `0 0 8px rgba(${rgb}, 0.18)`);
+    el.style.setProperty('--gradient-accent', `linear-gradient(135deg, ${baseHex} 0%, ${hslToHex(h, s, Math.max(l - 10, 10))} 100%)`);
+    el.style.setProperty('--gradient-accent-hover', `linear-gradient(135deg, ${hslToHex(h, s, Math.max(l - 10, 10))} 0%, ${hslToHex(h, s, Math.max(l - 10, 10))} 100%)`);
+    el.style.setProperty('--gradient-brand', `linear-gradient(135deg, ${baseHex}, ${hslToHex(h, s, Math.max(l - 10, 10))})`);
+
+    el.style.setProperty('--text-0', '#F2F5F9');
+    el.style.setProperty('--text-1', '#8A93A6');
+    el.style.setProperty('--text-2', '#5A6478');
+
+    el.style.setProperty('--green', '#22C55E');
+    el.style.setProperty('--red', '#F43F5E');
+    return;
   }
 
-  const el = document.documentElement;
-  el.style.setProperty('--text-0', text0);
-  el.style.setProperty('--text-1', text1);
-  el.style.setProperty('--text-2', text2);
+  // Named preset — just set data-theme; CSS handles the rest
+  const preset = THEME_PRESETS.find(p => p.id === presetId);
+  if (preset) {
+    el.setAttribute('data-theme', presetId);
+    localStorage.setItem('tj-preset', presetId);
+    localStorage.setItem('tj-theme', presetId);
+    // Clear any custom inline CSS vars so the data-theme CSS rules take precedence
+    const varsToClear = [
+      '--bg-0', '--bg-1', '--bg-2', '--bg-3', '--border',
+      '--cyan', '--cyan-dark', '--cyan-dim', '--cyan-dim2', '--cyan-border',
+      '--cyan-glow', '--cyan-glow-sm', '--gradient-accent', '--gradient-accent-hover', '--gradient-brand',
+      '--text-0', '--text-1', '--text-2',
+      '--green', '--red',
+    ];
+    varsToClear.forEach(v => el.style.removeProperty(v));
+  }
 }
 
 /* ════════════════════════════════════════════════
-   Settings Page Component
+   Backward-Compat No-Op Exports
+   (App.jsx still imports and calls these on mount)
    ════════════════════════════════════════════════ */
 
-export function SettingsPage({ theme, onToggleTheme }) {
+export function applyBgPreset() { /* no-op — handled by data-theme */ }
+export function applyAccentPreset() { /* no-op — handled by data-theme */ }
+export function applyTextPreset() { /* no-op — handled by data-theme */ }
+
+/* ════════════════════════════════════════════════
+   SettingsPage Component
+   ════════════════════════════════════════════════ */
+
+export function SettingsPage({ theme, onToggleTheme, currentUser, onLogout, onUserUpdate }) {
   const [settings, setSettings] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [bgPreset, setBgPreset] = useState(() => localStorage.getItem('tj-bg') || 'solid');
-  const [accentPreset, setAccentPreset] = useState(() => localStorage.getItem('tj-accent') || 'cyan');
-  const [textPreset, setTextPreset] = useState(() => localStorage.getItem('tj-text') || 'default');
+  const [activePreset, setActivePreset] = useState(() => localStorage.getItem('tj-preset') || 'terminal-teal');
+  const [customColor, setCustomColor] = useState(() => localStorage.getItem('tj-custom-base') || '#00D9A3');
   const [contrast, setContrast] = useState(() => parseInt(localStorage.getItem('tj-contrast') || '100', 10));
 
+  // Apply theme on mount
   useEffect(() => {
-    applyBgPreset(bgPreset, theme);
-    applyAccentPreset(accentPreset);
-    applyTextPreset(textPreset, theme);
+    applyThemePreset(activePreset);
   }, []);
 
+  // Contrast filter
   useEffect(() => {
     document.documentElement.style.filter = `contrast(${contrast}%) brightness(${contrast === 100 ? 100 : contrast - 10}%)`;
     localStorage.setItem('tj-contrast', contrast);
   }, [contrast]);
 
-  // Re-apply presets when theme changes
-  useEffect(() => {
-    applyBgPreset(bgPreset, theme);
-    applyTextPreset(textPreset, theme);
-  }, [theme]);
-
+  // Fetch settings
   useEffect(() => {
     api.getSettings().then(setSettings).catch(console.error);
   }, []);
@@ -226,22 +255,39 @@ export function SettingsPage({ theme, onToggleTheme }) {
     }
   };
 
-  const handleBgChange = (id) => {
-    setBgPreset(id);
-    applyBgPreset(id, theme);
+  const handlePresetSelect = (presetId) => {
+    setActivePreset(presetId);
+    applyThemePreset(presetId);
   };
 
-  const handleAccentChange = (id) => {
-    setAccentPreset(id);
-    applyAccentPreset(id);
+  const handleCustomColorChange = (hexColor) => {
+    setCustomColor(hexColor);
+    localStorage.setItem('tj-custom-base', hexColor);
+    setActivePreset('custom');
+    applyThemePreset('custom');
   };
 
-  const handleTextChange = (id) => {
-    setTextPreset(id);
-    applyTextPreset(id, theme);
-  };
-
-  const textPresets = theme === 'light' ? TEXT_PRESETS_LIGHT : TEXT_PRESETS_DARK;
+  // Resolve the active preset object for the live preview
+  const resolvedPreview = (() => {
+    const found = THEME_PRESETS.find(p => p.id === activePreset);
+    if (found) return found;
+    if (activePreset === 'custom') {
+      const hex = customColor;
+      const { h, s, l } = hexToHSL(hex);
+      return {
+        accent: hex,
+        accentDark: hslToHex(h, s, Math.max(l - 10, 10)),
+        bgBase: hslToHex(h, Math.min(s, 15), Math.max(l, 5)),
+        bgSurface: hslToHex(h, Math.min(s, 15), Math.max(l, 5) + 4),
+        profit: '#22C55E',
+        loss: '#F43F5E',
+        textPrimary: '#F2F5F9',
+        textSecondary: '#8A93A6',
+      };
+    }
+    // Fallback for dark/light
+    return THEME_PRESETS[0];
+  })();
 
   if (!settings) {
     return (
@@ -259,36 +305,176 @@ export function SettingsPage({ theme, onToggleTheme }) {
         <p>Configure appearance, trading rules, session windows, and API connections.</p>
       </div>
 
+      {/* ══════════════ Profile / Account ══════════════ */}
+      {currentUser && (
+        <div style={{ marginBottom: '28px' }}>
+          <ProfileSection user={currentUser} onLogout={onLogout} onUserUpdate={onUserUpdate} />
+        </div>
+      )}
+
       {/* ══════════════ Appearance ══════════════ */}
       <div className="card" style={{ marginBottom: '28px' }}>
         <div className="settings-section-title">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '6px', verticalAlign: 'text-bottom' }}>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '6px', verticalAlign: 'text-bottom' }}>
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
           Appearance
         </div>
 
-        {/* Theme Toggle */}
+        {/* ── Section: Theme Preset ── */}
+        <div style={{ marginBottom: '24px' }}>
+          <label style={{
+            display: 'block',
+            fontSize: '11px',
+            fontFamily: 'var(--mono)',
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            color: 'var(--text-2)',
+            marginBottom: '12px',
+            fontWeight: 600,
+          }}>
+            THEME PRESET
+          </label>
+
+          <div className="theme-preset-grid">
+            {THEME_PRESETS.map(preset => (
+              <button
+                key={preset.id}
+                className={`theme-preset-card ${activePreset === preset.id ? 'active' : ''}`}
+                onClick={() => handlePresetSelect(preset.id)}
+                id={`preset-${preset.id}-btn`}
+              >
+                <div className="theme-preset-colors">
+                  <span style={{ background: preset.bgBase }} />
+                  <span style={{ background: preset.bgSurface }} />
+                  <span style={{ background: preset.accent }} />
+                  <span style={{ background: preset.profit }} />
+                  <span style={{ background: preset.loss }} />
+                </div>
+                <span className="theme-preset-name">{preset.name}</span>
+                <span className="theme-preset-desc">{preset.desc}</span>
+              </button>
+            ))}
+
+            {/* Custom Card */}
+            <button
+              className={`theme-preset-card ${activePreset === 'custom' ? 'active' : ''}`}
+              onClick={() => handlePresetSelect('custom')}
+              id="preset-custom-btn"
+            >
+              <div className="theme-preset-colors">
+                <span style={{ background: hslToHex(hexToHSL(customColor).h, Math.min(hexToHSL(customColor).s, 15), Math.max(hexToHSL(customColor).l, 5)) }} />
+                <span style={{ background: hslToHex(hexToHSL(customColor).h, Math.min(hexToHSL(customColor).s, 15), Math.max(hexToHSL(customColor).l, 5) + 4) }} />
+                <span style={{ background: customColor }} />
+                <span style={{ background: '#22C55E' }} />
+                <span style={{ background: '#F43F5E' }} />
+              </div>
+              <span className="theme-preset-name" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                Custom
+                <input
+                  type="color"
+                  value={customColor}
+                  onChange={e => handleCustomColorChange(e.target.value)}
+                  onClick={e => e.stopPropagation()}
+                  style={{
+                    width: '22px',
+                    height: '22px',
+                    padding: 0,
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    borderRadius: '50%',
+                  }}
+                  title="Pick Custom Base Color"
+                  id="preset-custom-color-picker"
+                />
+              </span>
+              <span className="theme-preset-desc">Build your own</span>
+            </button>
+          </div>
+        </div>
+
+        {/* ── Section: Live Preview ── */}
+        <div style={{ marginBottom: '24px' }}>
+          <div className="theme-live-preview" style={{
+            background: resolvedPreview.bgSurface,
+            border: `1px solid ${resolvedPreview.bgRaised || resolvedPreview.borderColor || 'var(--border)'}`,
+            borderRadius: '10px',
+            padding: '20px',
+          }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+              gap: '16px',
+              marginBottom: '16px',
+            }}>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.08em', color: resolvedPreview.textSecondary, marginBottom: '6px', fontFamily: 'var(--mono)' }}>Balance</div>
+                <div style={{ fontSize: '20px', fontFamily: 'var(--mono)', fontWeight: 700, color: resolvedPreview.accent }}>$125,430</div>
+              </div>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.08em', color: resolvedPreview.textSecondary, marginBottom: '6px', fontFamily: 'var(--mono)' }}>Today's P&L</div>
+                <div style={{ fontSize: '20px', fontFamily: 'var(--mono)', fontWeight: 700, color: resolvedPreview.profit }}>+$2,847.50</div>
+              </div>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.08em', color: resolvedPreview.textSecondary, marginBottom: '6px', fontFamily: 'var(--mono)' }}>Win Rate</div>
+                <div style={{ fontSize: '20px', fontFamily: 'var(--mono)', fontWeight: 700, color: resolvedPreview.accent }}>68.5%</div>
+              </div>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.08em', color: resolvedPreview.textSecondary, marginBottom: '6px', fontFamily: 'var(--mono)' }}>Drawdown</div>
+                <div style={{ fontSize: '20px', fontFamily: 'var(--mono)', fontWeight: 700, color: resolvedPreview.loss }}>-1.2%</div>
+              </div>
+            </div>
+            <button
+              className="preview-cta"
+              style={{
+                width: '100%',
+                padding: '10px 0',
+                border: 'none',
+                borderRadius: '8px',
+                background: `linear-gradient(135deg, ${resolvedPreview.accent} 0%, ${resolvedPreview.accentDark || resolvedPreview.accent} 100%)`,
+                color: resolvedPreview.bgBase,
+                fontWeight: 700,
+                fontSize: '13px',
+                fontFamily: 'var(--mono)',
+                letterSpacing: '0.04em',
+                cursor: 'default',
+                textTransform: 'uppercase',
+              }}
+              id="preview-cta-btn"
+            >
+              Execute Trade
+            </button>
+          </div>
+        </div>
+
+        {/* ── Section: Classic Dark / Light Toggle ── */}
         <div style={{ marginBottom: '22px' }}>
-          <label className="form-label">Theme</label>
+          <label className="form-label">Classic</label>
           <div style={{ display: 'flex', gap: '10px' }}>
             <button
-              className={`appearance-chip ${theme === 'dark' ? 'active' : ''}`}
-              onClick={() => theme !== 'dark' && onToggleTheme()}
+              className={`appearance-chip ${(activePreset === 'dark' || (theme === 'dark' && !THEME_PRESETS.find(p => p.id === activePreset) && activePreset !== 'custom')) ? 'active' : ''}`}
+              onClick={() => {
+                handlePresetSelect('dark');
+                if (theme !== 'dark') onToggleTheme();
+              }}
               id="theme-dark-btn"
             >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
               </svg>
               Dark
             </button>
             <button
-              className={`appearance-chip ${theme === 'light' ? 'active' : ''}`}
-              onClick={() => theme !== 'light' && onToggleTheme()}
+              className={`appearance-chip ${activePreset === 'light' ? 'active' : ''}`}
+              onClick={() => {
+                handlePresetSelect('light');
+                if (theme !== 'light') onToggleTheme();
+              }}
               id="theme-light-btn"
             >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
                 <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
                 <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
@@ -298,84 +484,21 @@ export function SettingsPage({ theme, onToggleTheme }) {
           </div>
         </div>
 
-        {/* Background Style */}
-        <div style={{ marginBottom: '22px' }}>
-          <label className="form-label">Background Style & Color</label>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '10px' }}>
-            {BG_PRESETS.map(preset => (
-              <button
-                key={preset.id}
-                className={`appearance-chip appearance-chip-lg ${bgPreset === preset.id ? 'active' : ''}`}
-                onClick={() => handleBgChange(preset.id)}
-                id={`bg-${preset.id}-btn`}
-              >
-                <span className="appearance-chip-title">{preset.label}</span>
-                <span className="appearance-chip-desc">{preset.desc}</span>
-              </button>
-            ))}
-            <div className="appearance-chip appearance-chip-lg" style={{ display: 'flex', flexDirection: 'column', gap: '5px', padding: '10px', alignItems: 'center' }}>
-              <span className="appearance-chip-title">Custom Base</span>
-              <input type="color" value={bgPreset.startsWith('#') ? bgPreset : '#000000'} onChange={e => handleBgChange(e.target.value)} style={{ width: '40px', height: '24px', padding: '0', border: 'none', background: 'transparent', cursor: 'pointer' }} title="Pick Custom Background Color" />
-            </div>
-          </div>
-        </div>
-
-        {/* Accent Color */}
-        <div style={{ marginBottom: '22px' }}>
-          <label className="form-label">Accent Color</label>
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
-            {ACCENT_PRESETS.map(preset => (
-              <button
-                key={preset.id}
-                className={`accent-chip ${accentPreset === preset.id ? 'active' : ''}`}
-                onClick={() => handleAccentChange(preset.id)}
-                title={preset.label}
-                id={`accent-${preset.id}-btn`}
-              >
-                <span className="accent-swatch" style={{ background: preset.color }} />
-                <span>{preset.label}</span>
-              </button>
-            ))}
-            <div className={`accent-chip ${accentPreset.startsWith('#') ? 'active' : ''}`} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-              <input type="color" value={accentPreset.startsWith('#') ? accentPreset : '#22d3ee'} onChange={e => handleAccentChange(e.target.value)} style={{ width: '20px', height: '20px', padding: '0', border: 'none', background: 'transparent', cursor: 'pointer', borderRadius: '50%' }} title="Pick Custom Accent Color" />
-              <span>Custom</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Text Colors */}
-        <div style={{ marginBottom: '22px' }}>
-          <label className="form-label">Text Style</label>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '10px' }}>
-            {textPresets.map(preset => (
-              <button
-                key={preset.id}
-                className={`appearance-chip appearance-chip-lg ${textPreset === preset.id ? 'active' : ''}`}
-                onClick={() => handleTextChange(preset.id)}
-                id={`text-${preset.id}-btn`}
-              >
-                <span className="appearance-chip-title">{preset.label}</span>
-                <span className="text-preview-row">
-                  <span className="text-preview-dot" style={{ background: preset.text0 }} title="Headers" />
-                  <span className="text-preview-dot" style={{ background: preset.text1 }} title="Body" />
-                  <span className="text-preview-dot" style={{ background: preset.text2 }} title="Muted" />
-                </span>
-              </button>
-            ))}
-            <div className={`appearance-chip appearance-chip-lg ${textPreset.startsWith('#') ? 'active' : ''}`} style={{ display: 'flex', flexDirection: 'column', gap: '5px', padding: '10px', alignItems: 'center' }}>
-              <span className="appearance-chip-title">Custom Text</span>
-              <input type="color" value={textPreset.startsWith('#') ? textPreset : (theme === 'light' ? '#000000' : '#ffffff')} onChange={e => handleTextChange(e.target.value)} style={{ width: '40px', height: '24px', padding: '0', border: 'none', background: 'transparent', cursor: 'pointer' }} title="Pick Custom Text Color" />
-            </div>
-          </div>
-        </div>
-
-        {/* Contrast / Brightness Adjuster */}
-        <div style={{ marginBottom: '10px' }}>
+        {/* ── Section: Contrast Slider ── */}
+        <div className="accent-slider" style={{ marginBottom: '10px' }}>
            <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
              <span>Display Contrast / Boldness</span>
-             <span style={{ color: 'var(--text-2)' }}>{contrast}%</span>
+             <span style={{ color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{contrast}%</span>
            </label>
-           <input type="range" min="80" max="150" value={contrast} onChange={e => setContrast(parseInt(e.target.value))} style={{ width: '100%', cursor: 'pointer' }} />
+           <input
+             type="range"
+             min="80"
+             max="150"
+             value={contrast}
+             onChange={e => setContrast(parseInt(e.target.value))}
+             style={{ width: '100%', cursor: 'pointer' }}
+             id="contrast-slider"
+           />
            <p style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-2)' }}>Increase contrast if text appears too dim or washed out.</p>
         </div>
       </div>
@@ -385,15 +508,11 @@ export function SettingsPage({ theme, onToggleTheme }) {
         {/* Trade Limits */}
         <div className="card">
           <div className="settings-section-title">Trade Limits</div>
-          <div className="form-group">
-            <label className="form-label">Max Trades / Day</label>
-            <input type="number" className="form-input" value={settings.max_trades_per_day}
-              onChange={e => handleChange('max_trades_per_day', parseInt(e.target.value) || 0)} id="setting-max-trades-day" />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Max Trades / Session</label>
-            <input type="number" className="form-input" value={settings.max_trades_per_session}
-              onChange={e => handleChange('max_trades_per_session', parseInt(e.target.value) || 0)} id="setting-max-trades-session" />
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-2)', marginBottom: '16px', lineHeight: 1.6 }}>
+            <strong style={{ color: 'var(--text-1)' }}>Strict Bonus Limits Active:</strong><br/>
+            • Asia: Base 1 trade (Bonus 2nd trade if Asia Net P&L over last 2 days is profitable)<br/>
+            • London: Base 1 trade (Bonus 2nd trade if all today's previous trades are profitable)<br/>
+            • New York: Max 1 trade
           </div>
           <div className="form-group">
             <label className="form-label">Max Lot Size</label>
@@ -462,15 +581,38 @@ export function SettingsPage({ theme, onToggleTheme }) {
           </div>
         </div>
 
+        {/* Localization */}
+        <div className="card">
+          <div className="settings-section-title">Localization</div>
+          <div className="form-group">
+            <label className="form-label">Timezone</label>
+            <select
+              className="form-input"
+              value={settings.timezone || 'Asia/Kolkata'}
+              onChange={e => handleChange('timezone', e.target.value)}
+              style={{ width: '100%', cursor: 'pointer', background: 'var(--bg-2)', color: 'var(--text-0)' }}
+            >
+              <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
+              <option value="America/New_York">America/New_York (EST/EDT)</option>
+              <option value="Europe/London">Europe/London (GMT/BST)</option>
+              <option value="Asia/Tokyo">Asia/Tokyo (JST)</option>
+              <option value="Australia/Sydney">Australia/Sydney (AEST/AEDT)</option>
+              <option value="UTC">UTC</option>
+            </select>
+          </div>
+        </div>
+
         {/* API Config */}
         <div className="card">
           <div className="settings-section-title">API Configuration</div>
           <p style={{ fontSize: '0.8rem', color: 'var(--text-2)', lineHeight: 1.7 }}>
-            The NVIDIA NIM API key for Kimi 2.5 is configured via{' '}
+            The API key for Z.ai (GLM 5.2) is configured via{' '}
             <code style={{ color: 'var(--cyan)', background: 'var(--bg-3)', padding: '2px 6px', borderRadius: '4px', fontFamily: 'var(--mono)', fontSize: '0.75rem' }}>backend/.env</code>
           </p>
           <p style={{ fontSize: '0.8rem', color: 'var(--text-2)', marginTop: '8px', lineHeight: 1.7 }}>
             Set{' '}
+            <code style={{ color: 'var(--cyan)', background: 'var(--bg-3)', padding: '2px 6px', borderRadius: '4px', fontFamily: 'var(--mono)', fontSize: '0.75rem' }}>ZAI_API_KEY=your-key</code>
+            {' '}and{' '}
             <code style={{ color: 'var(--cyan)', background: 'var(--bg-3)', padding: '2px 6px', borderRadius: '4px', fontFamily: 'var(--mono)', fontSize: '0.75rem' }}>NVIDIA_API_KEY=nvapi-...</code>
             {' '}and restart the backend.
           </p>
@@ -483,7 +625,7 @@ export function SettingsPage({ theme, onToggleTheme }) {
             <><span className="loading-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Saving...</>
           ) : (
             <>
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
               </svg>
               Save Settings

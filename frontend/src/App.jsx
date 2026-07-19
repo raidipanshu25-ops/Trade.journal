@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useDashboard, useLiveData } from './hooks';
 import { Sidebar } from './components/Sidebar';
 import { StatCard } from './components/StatCard';
@@ -6,87 +6,146 @@ import { ScoreGauge } from './components/ScoreGauge';
 import { AlertFeed } from './components/AlertFeed';
 import { TradesTable } from './components/TradesTable';
 import { AIPanel } from './components/AIPanel';
-import { SettingsPage, applyBgPreset, applyAccentPreset, applyTextPreset } from './components/SettingsPage';
-import { HistoryPage } from './components/HistoryPage';
-import { ChartVisionPage } from './components/ChartVisionPage';
-import { AccountAnalysis } from './components/AccountAnalysis';
 import { LoginPage } from './components/LoginPage';
-import { api } from './api';
+
+// applyThemePreset is a pure function (no JSX) — import it directly
+// so SettingsPage.jsx can remain fully lazy-loaded.
+// We re-export applyThemePreset from a tiny shim to avoid the mixed
+// static+dynamic import Vite warning.
+import { applyThemePreset, applyBgPreset, applyAccentPreset, applyTextPreset } from './components/SettingsPage';
+import { api, authApi } from './api';
+
+// ── Lazy-load heavy page components ──────────────────────────────────
+// These are only fetched from the server when the user first navigates
+// to that page, keeping the initial JS bundle lean.
+const SettingsPage    = lazy(() => import('./components/SettingsPage').then(m => ({ default: m.SettingsPage })));
+const HistoryPage     = lazy(() => import('./components/HistoryPage').then(m => ({ default: m.HistoryPage })));
+const ChartVisionPage = lazy(() => import('./components/ChartVisionPage').then(m => ({ default: m.ChartVisionPage })));
+const AccountAnalysis = lazy(() => import('./components/AccountAnalysis').then(m => ({ default: m.AccountAnalysis })));
+const MT5AccountsPage = lazy(() => import('./components/MT5AccountsPage').then(m => ({ default: m.MT5AccountsPage })));
+const AdminPage       = lazy(() => import('./components/AdminPage').then(m => ({ default: m.AdminPage })));
+const MT5AccessPanel  = lazy(() => import('./components/MT5AccessPanel').then(m => ({ default: m.MT5AccessPanel })));
+
+// Fallback shown while a lazy chunk is loading
+function PageLoader() {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      minHeight: '60vh', color: 'var(--text-2)', fontFamily: 'var(--mono)',
+      fontSize: '0.82rem', gap: '10px',
+    }}>
+      <div className="loading-overlay-spinner" style={{ width: 20, height: 20 }} />
+      Loading…
+    </div>
+  );
+}
 
 function App() {
   const [page, setPage] = useState('dashboard');
   const dash = useDashboard();  // lightweight: health + loading status only
   const live = useLiveData();   // WebSocket: positions, account, discipline, stats — everything
 
-  // ── Theme (dark/light) ──
-  const [theme, setTheme] = useState(() => {
-    return localStorage.getItem('tj-theme') || 'dark';
-  });
+  // ── Theme (preset-based) ──────────────────────────────────────────
+  const [theme, setTheme] = useState(() =>
+    localStorage.getItem('tj-preset') || localStorage.getItem('tj-theme') || 'terminal-teal'
+  );
 
+  // Apply theme once on mount and whenever it changes (single effect, no duplicate)
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('tj-theme', theme);
-    // Re-apply presets for the new theme (gradients are theme-aware)
-    applyBgPreset(localStorage.getItem('tj-bg') || 'solid', theme);
-    applyTextPreset(localStorage.getItem('tj-text') || 'default', theme);
+    applyThemePreset(theme);
+    localStorage.setItem('tj-preset', theme);
   }, [theme]);
 
-  // Apply saved appearance preferences on mount
-  useEffect(() => {
-    const savedTheme = localStorage.getItem('tj-theme') || 'dark';
-    applyBgPreset(localStorage.getItem('tj-bg') || 'solid', savedTheme);
-    applyAccentPreset(localStorage.getItem('tj-accent') || 'cyan');
-    applyTextPreset(localStorage.getItem('tj-text') || 'default', savedTheme);
-  }, []);
+  const toggleTheme = useCallback(() => setTheme(prev => {
+    if (prev === 'light') return 'dark';
+    if (prev === 'dark') return 'light';
+    return 'light';
+  }), []);
 
-  const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
-
-  // ── Authentication ──
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    // If no ADMIN_PASSWORD is set, backend will return a token "no-auth-required", 
-    // but initially we assume auth unless there's an error. We'll start by assuming 
-    // we need a token if it's stored, or let the first /health call decide.
-    // To cleanly bootstrap, we assume authenticated until API throws 401.
-    return !!localStorage.getItem('tj-auth-token');
-  });
+  // ── Authentication ────────────────────────────────────────────────
+  const [isAuthenticated, setIsAuthenticated] = useState(
+    () => !!localStorage.getItem('tj-auth-token')
+  );
 
   useEffect(() => {
     const handleAuthExpired = () => setIsAuthenticated(false);
     window.addEventListener('auth-expired', handleAuthExpired);
-    
-    // Always check health on mount to see if auth is disabled or we are valid
-    api.health().then(() => {
-       setIsAuthenticated(true);
-    }).catch(err => {
-       if (err.message.includes('401')) setIsAuthenticated(false);
-    });
+
+    api.health().then(health => {
+      if (!health.auth_required) {
+        setIsAuthenticated(true);
+      } else if (localStorage.getItem('tj-auth-token')) {
+        api.getSettings()
+          .then(() => setIsAuthenticated(true))
+          .catch(() => {
+            localStorage.removeItem('tj-auth-token');
+            setIsAuthenticated(false);
+          });
+      } else {
+        setIsAuthenticated(false);
+      }
+    }).catch(() => { /* Backend unreachable — keep current auth state */ });
 
     return () => window.removeEventListener('auth-expired', handleAuthExpired);
   }, []);
 
-  // All data now flows through the WebSocket
-  const positions = live.positions;
-  const account = live.account;
-  const mt5Connected = live.connected || dash.mt5Connected;
+  // ── Current user ──────────────────────────────────────────────────
+  const [currentUser, setCurrentUser] = useState(null);
 
-  const alertCount = live.discipline?.alerts?.length || 0;
-  const score = live.discipline?.score ?? 100;
-  const stats = live.dailyStats || {};
-  const journalStats = live.journalStats || null;
-  const violationsPopup = live.discipline?.violations_popup || [];
-  const analytics = live.analytics;
+  const fetchCurrentUser = useCallback(() => {
+    if (localStorage.getItem('tj-auth-token')) {
+      authApi.getMe().then(setCurrentUser).catch(() => setCurrentUser(null));
+    }
+  }, []);
 
-  // Track dismissed popup so it doesn't spam (reset if violations change)
+  useEffect(() => {
+    if (isAuthenticated) fetchCurrentUser();
+  }, [isAuthenticated, fetchCurrentUser]);
+
+  const handleLogout = useCallback(async () => {
+    try { await authApi.logout(); } catch {}
+    localStorage.removeItem('tj-auth-token');
+    setIsAuthenticated(false);
+    setCurrentUser(null);
+  }, []);
+
+  // ── Derived data (memoised — recalculates only when source changes) ─
+  const positions     = live.positions;
+  const account       = live.account;
+  const mt5Connected  = live.connected || dash.mt5Connected;
+  const stats         = live.dailyStats  || {};
+  const journalStats  = live.journalStats || null;
+
+  const alertCount = useMemo(
+    () => live.discipline?.alerts?.length || 0,
+    [live.discipline?.alerts]
+  );
+
+  const score = useMemo(
+    () => live.discipline?.score ?? 100,
+    [live.discipline?.score]
+  );
+
+  const violationsPopup = useMemo(
+    () => live.discipline?.violations_popup || [],
+    [live.discipline?.violations_popup]
+  );
+
+  // ── Violation popup dismissal ────────────────────────────────────
   const [popupDismissed, setPopupDismissed] = useState(false);
   const [lastViolationKey, setLastViolationKey] = useState('');
 
+  const violationKey = useMemo(
+    () => violationsPopup.map(v => v.rule).sort().join(','),
+    [violationsPopup]
+  );
+
   useEffect(() => {
-    const key = violationsPopup.map(v => v.rule).sort().join(',');
-    if (key !== lastViolationKey) {
+    if (violationKey !== lastViolationKey) {
       setPopupDismissed(false);
-      setLastViolationKey(key);
+      setLastViolationKey(violationKey);
     }
-  }, [violationsPopup]);
+  }, [violationKey, lastViolationKey]);
 
   if (!isAuthenticated) {
     return <LoginPage onLogin={() => setIsAuthenticated(true)} />;
@@ -102,6 +161,8 @@ function App() {
         alertCount={alertCount}
         theme={theme}
         onToggleTheme={toggleTheme}
+        currentUser={currentUser}
+        onLogout={handleLogout}
       />
 
       <main className="main-content">
@@ -141,13 +202,14 @@ function App() {
             </div>
           </div>
         )}
+
         {/* ----------------------------- Dashboard ----------------------------- */}
         {page === 'dashboard' && (
           <div>
             <div className="page-header">
               <h2>Dashboard</h2>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <p>Real-time overview of your MT5 trading activity and discipline.</p>
+                <p>Live MT5 positions and trading performance.</p>
                 <div className={`ws-indicator ${live.wsStatus}`} title={`WebSocket: ${live.wsStatus}`}>
                   <span className="ws-dot" />
                   <span className="ws-label">{live.wsStatus === 'open' ? 'LIVE' : live.wsStatus === 'fallback' ? 'POLL' : 'SYNC'}</span>
@@ -171,10 +233,7 @@ function App() {
                 <button
                   className="btn btn-primary"
                   style={{ marginLeft: 'auto' }}
-                  onClick={async () => {
-                    await api.reconnect();
-                    dash.refresh();
-                  }}
+                  onClick={async () => { await api.reconnect(); dash.refresh(); }}
                   id="reconnect-btn"
                 >
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -185,6 +244,11 @@ function App() {
                 </button>
               </div>
             )}
+
+            {/* MT5 Access Controller — Prop Firm Safe Gatekeeper */}
+            <Suspense fallback={null}>
+              <MT5AccessPanel wsStatus={live.mt5Access} />
+            </Suspense>
 
             {/* Stats Grid */}
             <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
@@ -308,7 +372,7 @@ function App() {
                 </div>
                 <AlertFeed alerts={live.discipline?.alerts || []} />
               </div>
-              
+
               {/* Psychology Profile Card */}
               <div className="card content-grid-full">
                 <div className="card-header">
@@ -399,7 +463,9 @@ function App() {
 
         {/* ----------------------------- History ----------------------------- */}
         {page === 'history' && (
-          <HistoryPage mt5Connected={mt5Connected} historyUpdatedCounter={live.historyUpdatedCounter} />
+          <Suspense fallback={<PageLoader />}>
+            <HistoryPage mt5Connected={mt5Connected} historyUpdatedCounter={live.historyUpdatedCounter} />
+          </Suspense>
         )}
 
         {/* ----------------------------- Account Analysis ----------------------------- */}
@@ -409,7 +475,9 @@ function App() {
               <h2>Account Analysis</h2>
               <p>Comprehensive GFT-style analytics: Performance, Calendar, Distributions, and Advanced Metrics.</p>
             </div>
-            <AccountAnalysis analytics={analytics} account={account} />
+            <Suspense fallback={<PageLoader />}>
+              <AccountAnalysis analytics={live.analytics} account={account} />
+            </Suspense>
           </div>
         )}
 
@@ -493,101 +561,38 @@ function App() {
           <div>
             <div className="page-header">
               <h2>AI Trading Coach</h2>
-              <p>Professional analysis powered by Kimi 2.5 via NVIDIA NIM — your personal hedge-fund risk manager.</p>
+              <p>Professional analysis powered by Z.ai (GLM 5.2) — your personal hedge-fund risk manager.</p>
             </div>
             <AIPanel aiAvailable={dash.aiAvailable} />
           </div>
         )}
 
         {/* ----------------------------- Chart Vision ----------------------------- */}
-        {page === 'chartvision' && <ChartVisionPage />}
+        {page === 'chartvision' && (
+          <Suspense fallback={<PageLoader />}>
+            <ChartVisionPage />
+          </Suspense>
+        )}
 
         {/* ----------------------------- Settings ----------------------------- */}
-        {page === 'settings' && <SettingsPage theme={theme} onToggleTheme={toggleTheme} />}
+        {page === 'settings' && (
+          <Suspense fallback={<PageLoader />}>
+            <SettingsPage theme={theme} onToggleTheme={toggleTheme} currentUser={currentUser} onLogout={handleLogout} onUserUpdate={fetchCurrentUser} />
+          </Suspense>
+        )}
 
-        {/* ----------------------------- MT5 Terminal (New Tab Launcher) ----------------------------- */}
-        {page === 'exness' && (
-          <div>
-            <div className="page-header">
-              <h2>MT5 Web Terminal</h2>
-              <p>Trade directly from your account using the universal MT5 WebTerminal. Connect any broker.</p>
-            </div>
+        {/* ----------------------------- MT5 Accounts ----------------------------- */}
+        {page === 'mt5accounts' && (
+          <Suspense fallback={<PageLoader />}>
+            <MT5AccountsPage />
+          </Suspense>
+        )}
 
-            <div className="terminal-launcher">
-              <div className="terminal-launcher-hero">
-                <div className="terminal-launcher-icon">
-                  <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10"/>
-                    <line x1="2" y1="12" x2="22" y2="12"/>
-                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-                  </svg>
-                </div>
-                <h3>Launch Web Trading Terminal</h3>
-                <p>Opens the official MT5 WebTerminal in a new browser tab for the best trading experience.</p>
-                
-                <button
-                  className="btn btn-primary btn-lg"
-                  onClick={() => {
-                    window.open('https://trade.mql5.com/trade', '_blank', 'noopener,noreferrer');
-                  }}
-                  id="launch-terminal-btn"
-                >
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                    <polyline points="15 3 21 3 21 9"/>
-                    <line x1="10" y1="14" x2="21" y2="3"/>
-                  </svg>
-                  Open MT5 WebTerminal
-                </button>
-              </div>
-
-              <div className="terminal-tips">
-                <div className="terminal-tip-card">
-                  <div className="terminal-tip-icon">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-                    </svg>
-                  </div>
-                  <h4>Why a New Tab?</h4>
-                  <p>Most brokers block embedded iframes for security. Opening in a new tab gives you the full MT5 native experience with better performance.</p>
-                </div>
-                <div className="terminal-tip-card">
-                  <div className="terminal-tip-icon">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                      <circle cx="12" cy="12" r="3"/>
-                    </svg>
-                  </div>
-                  <h4>Slow Internet Tips</h4>
-                  <p>Chrome handles the connection natively with caching & service workers. Bookmark the terminal tab for instant access next time.</p>
-                </div>
-                <div className="terminal-tip-card">
-                  <div className="terminal-tip-icon">
-                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                    </svg>
-                  </div>
-                  <h4>Stay Synced</h4>
-                  <p>Trades you make in the MT5 terminal appear here in real-time. Keep both tabs open for the best workflow.</p>
-                </div>
-              </div>
-
-              {/* Quick Account Info */}
-              {account && (
-                <div className="terminal-account-summary">
-                  <div className="card-header">
-                    <span className="card-title">Quick Account Reference</span>
-                  </div>
-                  <div className="stats-grid" style={{ marginTop: 'var(--space-md)' }}>
-                    <StatCard title="Balance" value={`$${account.balance.toLocaleString()}`} type="neutral" />
-                    <StatCard title="Equity" value={`$${account.equity.toLocaleString()}`} type={account.profit >= 0 ? 'profit' : 'loss'} />
-                    <StatCard title="Free Margin" value={`$${account.free_margin.toLocaleString()}`} type="neutral" />
-                    <StatCard title="Open Positions" value={positions.length} type="neutral" />
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+        {/* ----------------------------- Admin Panel ----------------------------- */}
+        {page === 'admin' && currentUser?.role === 'admin' && (
+          <Suspense fallback={<PageLoader />}>
+            <AdminPage />
+          </Suspense>
         )}
 
         {/* Loading overlay */}

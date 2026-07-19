@@ -5,7 +5,7 @@ Handles connection management, data fetching, and trade history.
 import MetaTrader5 as mt5
 from datetime import datetime, timedelta, timezone
 
-IST = timezone(timedelta(hours=5, minutes=30))  # Indian Standard Time (UTC+5:30)
+from config import get_local_tz
 from typing import Optional
 import logging
 import time
@@ -97,9 +97,9 @@ class MT5Service:
         positions = mt5.positions_get()
         pos_list = []
         if positions:
-            now = datetime.now(IST)
+            now = datetime.now(get_local_tz())
             for p in positions:
-                open_time = datetime.fromtimestamp(p.time, tz=IST)
+                open_time = datetime.fromtimestamp(p.time, tz=get_local_tz())
                 duration = max(0.0, (now - open_time).total_seconds() / 60.0)
                 pos_list.append({
                     "ticket": p.ticket,
@@ -120,7 +120,7 @@ class MT5Service:
             "connected": True,
             "account": account,
             "positions": pos_list,
-            "timestamp": datetime.now(IST).isoformat(),
+            "timestamp": datetime.now(get_local_tz()).isoformat(),
         }
 
     def get_account_info(self) -> Optional[dict]:
@@ -154,9 +154,9 @@ class MT5Service:
             return []
 
         result = []
-        now = datetime.now(IST)
+        now = datetime.now(get_local_tz())
         for p in positions:
-            open_time = datetime.fromtimestamp(p.time, tz=IST)
+            open_time = datetime.fromtimestamp(p.time, tz=get_local_tz())
             duration = max(0.0, (now - open_time).total_seconds() / 60.0)
             result.append({
                 "ticket": p.ticket,
@@ -173,6 +173,57 @@ class MT5Service:
                 "comment": p.comment or "",
             })
         return result
+
+    def close_position(self, position_id: int, volume: Optional[float] = None) -> dict:
+        """Close a specific open position (fully or partially)."""
+        if not self.is_connected:
+            return {"status": "error", "message": "MT5 not connected"}
+        
+        position = mt5.positions_get(ticket=position_id)
+        if not position:
+            return {"status": "error", "message": "Position not found"}
+        
+        position = position[0]
+        close_volume = volume if volume else position.volume
+        tick = mt5.symbol_info_tick(position.symbol)
+        if not tick:
+            return {"status": "error", "message": "Symbol tick not found"}
+            
+        type_dict = {
+            mt5.ORDER_TYPE_BUY: mt5.ORDER_TYPE_SELL,
+            mt5.ORDER_TYPE_SELL: mt5.ORDER_TYPE_BUY
+        }
+        price_dict = {
+            mt5.ORDER_TYPE_BUY: tick.bid,
+            mt5.ORDER_TYPE_SELL: tick.ask
+        }
+        
+        order_type = type_dict.get(position.type)
+        if order_type is None:
+            return {"status": "error", "message": "Unsupported order type"}
+            
+        price = price_dict[position.type]
+        
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": position.symbol,
+            "volume": float(close_volume),
+            "type": order_type,
+            "position": position.ticket,
+            "price": float(price),
+            "deviation": 20,
+            "magic": 0,
+            "comment": "Journal AutoClose",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        
+        result = mt5.order_send(request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            return {"status": "error", "message": f"Order send failed: {result.comment} ({result.retcode})"}
+        
+        return {"status": "success", "result": result._asdict()}
+
 
     # ------------------------------------------------------------------ #
     #  Closed deals for a date range
@@ -200,7 +251,7 @@ class MT5Service:
                 "profit": d.profit,
                 "commission": d.commission,
                 "swap": d.swap,
-                "time": datetime.fromtimestamp(d.time, tz=IST).isoformat(),
+                "time": datetime.fromtimestamp(d.time, tz=get_local_tz()).isoformat(),
                 "comment": d.comment or "",
                 "entry": d.entry,  # 0=IN, 1=OUT, 2=INOUT, 3=OUT_BY
                 "position_id": d.position_id,
@@ -209,7 +260,7 @@ class MT5Service:
 
     def get_today_deals(self) -> list[dict]:
         """Convenience: closed deals for today."""
-        now = datetime.now(IST)
+        now = datetime.now()  # Naive datetime for MT5 API
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         return self.get_deals(start, now)
 
@@ -217,7 +268,7 @@ class MT5Service:
         """Get history orders for today (gives open_time for duration calc)."""
         if not self.is_connected:
             return []
-        now = datetime.now(IST)
+        now = datetime.now()  # Naive datetime for MT5 API
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         orders = mt5.history_orders_get(start, now)
         if orders is None:
@@ -228,8 +279,8 @@ class MT5Service:
                 "symbol": o.symbol,
                 "type": "BUY" if o.type in (0, 2, 4) else "SELL",
                 "volume_initial": o.volume_initial,
-                "time_setup": datetime.fromtimestamp(o.time_setup, tz=IST).isoformat(),
-                "time_done": datetime.fromtimestamp(o.time_done, tz=IST).isoformat() if o.time_done else None,
+                "time_setup": datetime.fromtimestamp(o.time_setup, tz=get_local_tz()).isoformat(),
+                "time_done": datetime.fromtimestamp(o.time_done, tz=get_local_tz()).isoformat() if o.time_done else None,
                 "state": o.state,
                 "comment": o.comment or "",
             }
@@ -242,7 +293,7 @@ class MT5Service:
     def get_daily_stats(self, date: Optional[datetime] = None) -> dict:
         """Compute aggregate statistics for a given day."""
         if date is None:
-            date = datetime.now(IST)
+            date = datetime.now(get_local_tz())
         start = date.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
 
@@ -256,18 +307,19 @@ class MT5Service:
         for d in deals:
             pid = d["position_id"]
             if pid not in pos_map:
-                pos_map[pid] = {"in": None, "out": None}
+                pos_map[pid] = {"in": None, "outs": []}
             if d["entry"] == 0:
                 pos_map[pid]["in"] = d
             elif d["entry"] == 1:
-                pos_map[pid]["out"] = d
+                pos_map[pid]["outs"].append(d)
 
         closed = []
         trade_sequence = []
         
         for pid, pdata in pos_map.items():
-            if pdata["out"]:
-                out_deal = pdata["out"]
+            if pdata["outs"]:
+                outs_sorted = sorted(pdata["outs"], key=lambda x: x["time"])
+                last_out = outs_sorted[-1]
                 in_deal = pdata["in"]
                 
                 # If IN deal is missing (cross-day trade), fetch via position lookup
@@ -278,7 +330,7 @@ class MT5Service:
                             for d in pid_deals:
                                 if d.entry == 0:
                                     in_deal = {
-                                        "time": datetime.fromtimestamp(d.time, tz=IST).isoformat(),
+                                        "time": datetime.fromtimestamp(d.time, tz=get_local_tz()).isoformat(),
                                         "price": d.price,
                                         "type": "BUY" if d.type == 0 else "SELL",
                                         "entry": 0,
@@ -287,6 +339,13 @@ class MT5Service:
                                     break
                     except Exception:
                         pass
+                
+                total_profit = round(sum(d["profit"] for d in outs_sorted), 2)
+                total_volume = round(sum(d["volume"] for d in outs_sorted), 2)
+                
+                out_deal = last_out.copy()
+                out_deal["profit"] = total_profit
+                out_deal["volume"] = total_volume
                 
                 duration_mins = 0.0
                 if in_deal:
@@ -428,7 +487,7 @@ class MT5Service:
         if not self.is_connected:
             return []
 
-        now = datetime.now(IST)
+        now = datetime.now(get_local_tz())
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
         sh, sm = map(int, session_start.split(":"))
@@ -463,7 +522,7 @@ class MT5Service:
         """Total unique trades opened today (closed + still open), excluding partial close remainders."""
         if not self.is_connected:
             return 0
-        now = datetime.now(IST)
+        now = datetime.now(get_local_tz())
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         unique = self._get_unique_entries(day_start, now)
         # Add open positions not already counted

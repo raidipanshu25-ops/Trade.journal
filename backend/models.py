@@ -75,11 +75,11 @@ class DisciplineReport(BaseModel):
 
 
 class RulesConfig(BaseModel):
-    max_trades_per_day: int = 3
-    max_trades_per_session: int = 2
+    timezone: str = "Asia/Kolkata"
     max_lot_size: float = 1.0
-    max_daily_loss_pct: float = 3.0
+    max_daily_loss_pct: float = 0.8
     max_session_loss_pct: float = 2.0
+    auto_enforce_rules: bool = False
     sessions: dict = {}
     allowed_trading_window: dict = {}
     allowed_symbols: list[str] = []
@@ -88,3 +88,19 @@ class RulesConfig(BaseModel):
 class AIAnalysisRequest(BaseModel):
     date: Optional[str] = None    # defaults to today
     custom_prompt: Optional[str] = None
+
+
+class MT5AccountCreate(BaseModel):
+    login: int
+    password: str
+    server: str
+
+class MT5AccountResponse(BaseModel):
+    id: int
+    user_id: int
+    login: int
+    server: str
+    metaapi_account_id: Optional[str] = None
+    state: str
+    connection_status: str
+    created_at: str

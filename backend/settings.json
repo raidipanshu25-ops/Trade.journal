@@ -1,28 +1,26 @@
 {
-  "max_trades_per_day": 3,
-  "max_trades_per_session": 1,
   "max_lot_size": 0.5,
-  "max_daily_loss_pct": 1.0,
+  "max_daily_loss_pct": 0.8,
   "max_session_loss_pct": 0.6,
   "sessions": {
     "asia": {
-      "start": "11:30",
+      "start": "05:30",
       "end": "12:00",
       "enabled": true
     },
     "london": {
-      "start": "13:30",
-      "end": "15:30",
+      "start": "13:00",
+      "end": "16:30",
       "enabled": true
     },
     "newyork": {
-      "start": "06:00",
+      "start": "19:00",
       "end": "22:00",
       "enabled": true
     }
   },
   "allowed_trading_window": {
-    "start": "11:30",
+    "start": "05:30",
     "end": "22:00",
     "enabled": true
   },

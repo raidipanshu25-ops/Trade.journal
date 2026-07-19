@@ -31,50 +31,54 @@ const icons = {
   accountAnalysis: (
     <svg viewBox="0 0 24 24"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
   ),
+  mt5accounts: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="5" width="20" height="14" rx="2"/>
+      <line x1="2" y1="10" x2="22" y2="10"/>
+      <circle cx="7" cy="15" r="1" fill="currentColor"/>
+    </svg>
+  ),
+  admin: (
+    <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+  ),
 };
 
-export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, alertCount, theme, onToggleTheme }) {
+export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, alertCount, theme, onToggleTheme, currentUser, onLogout }) {
   const navItems = [
     { id: 'dashboard',        label: 'Dashboard',         icon: 'dashboard' },
-    { id: 'trades',             label: 'Positions',         icon: 'trades' },
-    { id: 'history',            label: 'History',           icon: 'history' },
-    { id: 'accountAnalysis',    label: 'Account Analysis',  icon: 'accountAnalysis' },
-    { id: 'discipline',         label: 'Discipline',        icon: 'discipline', badge: alertCount },
-    { id: 'analysis',           label: 'AI Coach',          icon: 'analysis' },
-    { id: 'chartvision',        label: 'Chart Vision',      icon: 'chartvision' },
-    { id: 'exness',             label: 'MT5 Terminal',      icon: 'exness' },
-    { id: 'settings',           label: 'Settings',          icon: 'settings' },
+    { id: 'trades',           label: 'Positions',         icon: 'trades' },
+    { id: 'history',          label: 'History',           icon: 'history' },
+    { id: 'accountAnalysis',  label: 'Account Analysis',  icon: 'accountAnalysis' },
+    { id: 'discipline',       label: 'Discipline',        icon: 'discipline', badge: alertCount },
+    { id: 'analysis',         label: 'AI Coach',          icon: 'analysis' },
+    { id: 'chartvision',      label: 'Chart Vision',      icon: 'chartvision' },
+    { id: 'mt5accounts',      label: 'MT5 Accounts',      icon: 'mt5accounts' },
+    { id: 'settings',         label: 'Settings',          icon: 'settings' },
   ];
+
+  if (currentUser?.role === 'admin') {
+    navItems.push({ id: 'admin', label: 'Admin Panel', icon: 'admin' });
+  }
 
   return (
     <aside className="sidebar" id="sidebar">
       {/* Brand */}
-      <div className="sidebar-brand">
+      <div className="sidebar-brand" title="AI Trading Journal">
         <div className="sidebar-brand-icon">
-          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="4" y="8" width="3" height="10" rx="1" fill="url(#brandGrad)"/>
-            <rect x="10.5" y="4" width="3" height="14" rx="1" fill="url(#brandGrad)"/>
-            <rect x="17" y="10" width="3" height="8" rx="1" fill="url(#brandGrad)"/>
-            <line x1="5.5" y1="5" x2="5.5" y2="8" stroke="url(#brandGrad)" strokeWidth="1.2" strokeLinecap="round"/>
-            <line x1="12" y1="1.5" x2="12" y2="4" stroke="url(#brandGrad)" strokeWidth="1.2" strokeLinecap="round"/>
-            <line x1="18.5" y1="7" x2="18.5" y2="10" stroke="url(#brandGrad)" strokeWidth="1.2" strokeLinecap="round"/>
-            <defs>
-              <linearGradient id="brandGrad" x1="0" y1="0" x2="24" y2="24">
-                <stop offset="0%" stopColor="#22d3ee"/>
-                <stop offset="100%" stopColor="#3b82f6"/>
-              </linearGradient>
-            </defs>
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="var(--accent)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="3 17 9 11 13 15 21 7"/>
+            <polyline points="17 7 21 7 21 11"/>
           </svg>
         </div>
         <div className="sidebar-brand-text">
-          <h1>Trade<span className="brand-dot">.</span><span className="brand-accent">journal</span></h1>
-          <span className="brand-tag">mt5 · live</span>
+          <h1>Trading Journal</h1>
+          <span className="brand-tag">AI Analytics</span>
         </div>
       </div>
 
       {/* Nav */}
       <nav className="sidebar-nav">
-        <div className="nav-section-label">Navigation</div>
+        <div className="nav-section-label">Menu</div>
         {navItems.map(item => (
           <button
             key={item.id}
@@ -102,7 +106,7 @@ export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, ale
             </div>
             <div className="connection-status" style={{ marginTop: '6px' }}>
               <div className={`connection-dot ${aiAvailable ? 'connected' : ''}`} />
-              <span>Kimi 2.5 {aiAvailable ? 'Ready' : 'No Key'}</span>
+              <span>Z.ai {aiAvailable ? 'Ready' : 'No Key'}</span>
             </div>
           </div>
           <button
@@ -130,7 +134,26 @@ export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, ale
             )}
           </button>
         </div>
-        <div className="sidebar-version">v1.0.0 · Trade.journal</div>
+        <div className="sidebar-version">Trading Journal · v1.0</div>
+        {currentUser && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ width: '26px', height: '26px', borderRadius: '50%', background: 'var(--accent-dim)', border: '1px solid var(--accent-border)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.65rem', fontWeight: 700, color: 'var(--accent)', textTransform: 'uppercase' }}>
+                {currentUser.username?.charAt(0) || '?'}
+              </div>
+              <div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-0)', fontWeight: 600, lineHeight: '1.2' }}>{currentUser.username}</div>
+                <div style={{ fontSize: '0.62rem', color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{currentUser.role}</div>
+              </div>
+            </div>
+            {onLogout && (
+              <button className="btn-icon" onClick={onLogout} title="Sign out" style={{ width: '24px', height: '24px' }} id="sidebar-logout">
+                <svg viewBox="0 0 24 24" width="14" height="14"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </aside>
   );

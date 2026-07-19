@@ -61,7 +61,7 @@ export function AIPanel({ aiAvailable }) {
             <path d="M12 14v-4"/>
           </svg>
           AI Trading Coach
-          <span className="ai-badge">Kimi 2.5</span>
+          <span className="ai-badge">Z.ai</span>
         </h3>
         <button
           className="btn btn-primary"

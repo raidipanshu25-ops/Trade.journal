@@ -4,7 +4,7 @@ Evaluates current trading activity against configured rules and generates alerts
 """
 from datetime import datetime, timezone, timedelta
 
-IST = timezone(timedelta(hours=5, minutes=30))  # Indian Standard Time (UTC+5:30)
+from config import get_local_tz
 from typing import Optional
 from config import load_settings
 import logging
@@ -78,6 +78,7 @@ class DisciplineChecker:
                     "severity": "warning",
                 })
 
+
         # Score (100 minus penalty per alert)
         critical_count = sum(1 for a in alerts if a["severity"] == "critical")
         warning_count = sum(1 for a in alerts if a["severity"] == "warning")
@@ -113,7 +114,7 @@ class DisciplineChecker:
     def _check_daily_trade_count(self, rules: dict) -> list[dict]:
         """Alert if total trades today exceed the daily limit."""
         alerts = []
-        max_daily = rules.get("max_trades_per_day", 3)
+        max_daily = 4 # Prop Firm absolute max: Asia(1) + London(2) + NY(1)
         count = self.mt5.count_trades_today()
         if count > max_daily:
             alerts.append(self._make_alert(
@@ -130,54 +131,49 @@ class DisciplineChecker:
         return alerts
 
     def _check_session_trades(self, rules: dict) -> tuple[list[dict], list[dict]]:
-        """Check each session's trade count with carry-over bonus logic.
-        
-        CARRY-OVER RULE: If Asia AND London both have 0 trades,
-        New York gets +1 extra trade (bonus) but trades must have >=15m gap.
+        """Check each session's trade count using Prop Firm Session rules.
+        Asia: Max 1
+        London: Max 1 (or 2 if Asia and London-1 are profitable)
+        New York: Max 1
         """
         alerts = []
         session_stats = []
-        max_per_session = rules.get("max_trades_per_session", 2)
         sessions = rules.get("sessions", {})
+        
+        prop_firm_limits = {
+            "asia": 2,
+            "london": 2,  # Strict controller blocks trade 2 if conditions aren't met
+            "newyork": 1
+        }
 
-        # First pass: count trades in each session
-        session_counts = {}
+        # Track position_ids already counted so overlapping sessions don't double-count
+        counted_positions = set()
+
         for name, cfg in sessions.items():
             if not cfg.get("enabled", True):
                 continue
-            start = cfg["start"]
-            end = cfg["end"]
-            count = self.mt5.count_trades_in_session(start, end)
-            session_counts[name] = count
 
-        # Determine carry-over bonus for New York
-        asia_count = session_counts.get("asia", 0)
-        london_count = session_counts.get("london", 0)
-        ny_bonus = 0
-        if asia_count == 0 and london_count == 0:
-            ny_bonus = 1  # +1 bonus trade for NY
+            # Get unique entries for this session, excluding already-counted positions
+            entries = self.mt5.get_unique_session_entries(cfg["start"], cfg["end"])
+            unique_entries = [
+                e for e in entries
+                if e.get("position_id", e.get("ticket")) not in counted_positions
+            ]
+            count = len(unique_entries)
 
-        # Second pass: build stats and alerts
-        for name, cfg in sessions.items():
-            if not cfg.get("enabled", True):
-                continue
-            count = session_counts.get(name, 0)
-            effective_limit = max_per_session
+            # Mark these positions as counted
+            for e in unique_entries:
+                counted_positions.add(e.get("position_id", e.get("ticket")))
 
-            if name == "newyork" and ny_bonus > 0:
-                effective_limit += ny_bonus
+            effective_limit = prop_firm_limits.get(name, 1)
 
             within_limit = count <= effective_limit
-
-            bonus_text = ""
-            if name == "newyork" and ny_bonus > 0:
-                bonus_text = f" (+{ny_bonus} carry-over)"
 
             session_stats.append({
                 "session_name": name.capitalize(),
                 "trade_count": count,
                 "max_trades": effective_limit,
-                "bonus": ny_bonus if name == "newyork" else 0,
+                "bonus": 0,
                 "net_pnl": 0.0,
                 "within_limit": within_limit,
             })
@@ -185,7 +181,7 @@ class DisciplineChecker:
             if count > effective_limit:
                 alerts.append(self._make_alert(
                     f"session_trade_limit_{name}", "critical",
-                    f"{name.capitalize()} session: limit exceeded ({count}/{effective_limit}{bonus_text})",
+                    f"{name.capitalize()} session: limit exceeded ({count}/{effective_limit})",
                     f"Session {cfg['start']}–{cfg['end']}"
                 ))
 
@@ -214,7 +210,7 @@ class DisciplineChecker:
             return alerts
 
         # Check all trades opened today (closed deals + open positions)
-        now = datetime.now(IST)
+        now = datetime.now(get_local_tz())
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         deals = self.mt5.get_deals(day_start, now)
         entry_deals = [d for d in deals if d.get("entry") == 0]
@@ -305,7 +301,7 @@ class DisciplineChecker:
         if not window.get("enabled", False):
             return alerts
 
-        now = datetime.now(IST)
+        now = datetime.now(get_local_tz())
         w_start_h, w_start_m = map(int, window["start"].split(":"))
         w_end_h, w_end_m = map(int, window["end"].split(":"))
 
@@ -329,7 +325,7 @@ class DisciplineChecker:
     def _check_daily_loss(self, rules: dict) -> list[dict]:
         """Alert if daily loss exceeds the configured percentage of balance."""
         alerts = []
-        max_loss_pct = rules.get("max_daily_loss_pct", 3.0)
+        max_loss_pct = rules.get("max_daily_loss_pct", 0.8)
         account = self.mt5.get_account_info()
         if account is None:
             return alerts
@@ -360,7 +356,7 @@ class DisciplineChecker:
     @staticmethod
     def _make_alert(rule: str, severity: str, message: str, details: str = "") -> dict:
         return {
-            "timestamp": datetime.now(IST).isoformat(),
+            "timestamp": datetime.now(get_local_tz()).isoformat(),
             "rule": rule,
             "severity": severity,
             "message": message,

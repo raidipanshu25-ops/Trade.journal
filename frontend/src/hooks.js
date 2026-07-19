@@ -40,108 +40,34 @@ export function usePolling(fetchFn, intervalMs = 5000) {
  * Falls back to REST polling if WebSocket fails.
  */
 export function useLiveData() {
-  const [positions, setPositions] = useState([]);
-  const [account, setAccount] = useState(null);
-  const [connected, setConnected] = useState(false);
-  const [wsStatus, setWsStatus] = useState('connecting'); // connecting | open | closed | fallback
+  const [positions, setPositions]   = useState([]);
+  const [account, setAccount]       = useState(null);
+  const [connected, setConnected]   = useState(false);
+  const [wsStatus, setWsStatus]     = useState('connecting'); // connecting | open | closed | fallback
   const [historyUpdatedCounter, setHistoryUpdatedCounter] = useState(0);
 
   // Heavy data — only updated on full ticks (every 3s)
-  const [dailyStats, setDailyStats] = useState(null);
-  const [discipline, setDiscipline] = useState(null);
+  const [dailyStats, setDailyStats]     = useState(null);
+  const [discipline, setDiscipline]     = useState(null);
   const [journalStats, setJournalStats] = useState(null);
-  const [analytics, setAnalytics] = useState(null);
+  const [analytics, setAnalytics]       = useState(null);
+  const [mt5Access, setMt5Access]       = useState(null);
 
-  const wsRef = useRef(null);
-  const reconnectTimer = useRef(null);
-  const fallbackTimer = useRef(null);
-  const reconnectDelay = useRef(1000);
-  const mountedRef = useRef(true);
-
-  const connectWs = useCallback(() => {
-    if (!mountedRef.current) return;
-
-    try {
-      // Build WebSocket URL from current location
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const token = localStorage.getItem('tj-auth-token') || '';
-      const wsUrl = `${proto}//${window.location.host}/ws/live?token=${token}`;
-      
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-      setWsStatus('connecting');
-
-      ws.onopen = () => {
-        if (!mountedRef.current) return;
-        setWsStatus('open');
-        reconnectDelay.current = 1000; // Reset backoff
-        // Clear any fallback polling
-        if (fallbackTimer.current) {
-          clearInterval(fallbackTimer.current);
-          fallbackTimer.current = null;
-        }
-      };
-
-      ws.onmessage = (event) => {
-        if (!mountedRef.current) return;
-        try {
-          const data = JSON.parse(event.data);
-          
-          if (data.history_updated) {
-            setHistoryUpdatedCounter(prev => prev + 1);
-          }
-          
-          setPositions(data.positions || []);
-          setAccount(data.account || null);
-          setConnected(data.connected || false);
-
-          // Full-tick fields (only present every 3rd tick)
-          if (data.daily_stats !== undefined) {
-            setDailyStats(data.daily_stats);
-          }
-          if (data.discipline !== undefined) {
-            setDiscipline(data.discipline);
-          }
-          if (data.journal_stats !== undefined) {
-            setJournalStats(data.journal_stats);
-          }
-          if (data.analytics !== undefined) {
-            setAnalytics(data.analytics);
-          }
-        } catch (e) {
-          console.warn('WS parse error:', e);
-        }
-      };
-
-      ws.onclose = () => {
-        if (!mountedRef.current) return;
-        setWsStatus('closed');
-        wsRef.current = null;
-        // Start fallback polling while we try to reconnect
-        startFallbackPolling();
-        // Try reconnecting with backoff (max 10s)
-        reconnectTimer.current = setTimeout(() => {
-          reconnectDelay.current = Math.min(reconnectDelay.current * 1.5, 10000);
-          connectWs();
-        }, reconnectDelay.current);
-      };
-
-      ws.onerror = () => {
-        // onclose will fire after this
-        ws.close();
-      };
-    } catch (e) {
-      console.warn('WebSocket creation failed, using REST fallback:', e);
-      setWsStatus('fallback');
-      startFallbackPolling();
-    }
-  }, []);
+  const wsRef             = useRef(null);
+  const reconnectTimer    = useRef(null);
+  const fallbackTimer     = useRef(null);
+  const reconnectDelay    = useRef(1000);
+  const mountedRef        = useRef(true);
+  // Track whether WS is currently open so fallback polling can skip
+  const wsOpenRef         = useRef(false);
 
   const startFallbackPolling = useCallback(() => {
     if (fallbackTimer.current) return; // Already polling
     setWsStatus('fallback');
-    
+    wsOpenRef.current = false;
+
     const poll = async () => {
+      if (!mountedRef.current) return;
       try {
         const res = await fetch('/api/positions-live');
         if (res.ok) {
@@ -152,14 +78,87 @@ export function useLiveData() {
             setConnected(data.connected || false);
           }
         }
-      } catch (e) {
+      } catch {
         // Silently retry
       }
     };
-    
+
     poll(); // Immediate first fetch
     fallbackTimer.current = setInterval(poll, 2000); // 2s fallback polling
   }, []);
+
+  const connectWs = useCallback(() => {
+    if (!mountedRef.current) return;
+
+    try {
+      const proto  = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const token  = localStorage.getItem('tj-auth-token') || '';
+      const wsUrl  = `${proto}//${window.location.host}/ws/live?token=${token}`;
+
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      setWsStatus('connecting');
+
+      ws.onopen = () => {
+        if (!mountedRef.current) return;
+        wsOpenRef.current = true;
+        setWsStatus('open');
+        reconnectDelay.current = 1000; // Reset backoff
+
+        // Stop fallback polling — WebSocket is now delivering data
+        if (fallbackTimer.current) {
+          clearInterval(fallbackTimer.current);
+          fallbackTimer.current = null;
+        }
+      };
+
+      ws.onmessage = (event) => {
+        if (!mountedRef.current) return;
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.history_updated) {
+            setHistoryUpdatedCounter(prev => prev + 1);
+          }
+
+          // Only update if value is present (avoid wiping with undefined)
+          if (data.positions !== undefined) setPositions(data.positions || []);
+          if (data.account   !== undefined) setAccount(data.account || null);
+          if (data.connected !== undefined) setConnected(data.connected || false);
+
+          // Full-tick fields (only present every 3rd tick)
+          if (data.daily_stats  !== undefined) setDailyStats(data.daily_stats);
+          if (data.discipline   !== undefined) setDiscipline(data.discipline);
+          if (data.journal_stats !== undefined) setJournalStats(data.journal_stats);
+          if (data.analytics    !== undefined) setAnalytics(data.analytics);
+          if (data.mt5_access   !== undefined) setMt5Access(data.mt5_access);
+        } catch (e) {
+          console.warn('WS parse error:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        if (!mountedRef.current) return;
+        wsOpenRef.current = false;
+        setWsStatus('closed');
+        wsRef.current = null;
+        // Start fallback polling while we try to reconnect
+        startFallbackPolling();
+        // Reconnect with exponential backoff (max 10s)
+        reconnectTimer.current = setTimeout(() => {
+          reconnectDelay.current = Math.min(reconnectDelay.current * 1.5, 10000);
+          connectWs();
+        }, reconnectDelay.current);
+      };
+
+      ws.onerror = () => {
+        ws.close(); // onclose will fire after this
+      };
+    } catch (e) {
+      console.warn('WebSocket creation failed, using REST fallback:', e);
+      startFallbackPolling();
+    }
+  }, [startFallbackPolling]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -167,56 +166,53 @@ export function useLiveData() {
 
     return () => {
       mountedRef.current = false;
+      wsOpenRef.current  = false;
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
-      if (reconnectTimer.current) {
-        clearTimeout(reconnectTimer.current);
-      }
-      if (fallbackTimer.current) {
-        clearInterval(fallbackTimer.current);
-      }
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (fallbackTimer.current)  clearInterval(fallbackTimer.current);
     };
   }, [connectWs]);
 
   return {
     positions, account, connected, wsStatus, historyUpdatedCounter,
-    dailyStats, discipline, journalStats, analytics,
+    dailyStats, discipline, journalStats, analytics, mt5Access,
   };
 }
 
 
 /**
- * Lightweight dashboard hook — no more 15s heavy polling.
+ * Lightweight dashboard hook — health check only.
  *
  * On mount: one-shot health check to determine MT5 + AI availability.
- * Every 30s: lightweight health ping only.
+ * Every 60s (not 30s): lightweight health ping.
+ *   ‣ If WebSocket is open, real-time data flows through useLiveData()
+ *     so the health ping interval can be relaxed significantly.
  * Manual refresh() fetches everything via REST as a fallback.
- *
- * All heavy data (discipline, daily stats, journal stats) now comes
- * through the useLiveData() WebSocket — see App.jsx.
  */
 export function useDashboard() {
   const [state, setState] = useState({
-    health: null,
-    loading: true,
-    error: null,
+    health:       null,
+    loading:      true,
+    error:        null,
     mt5Connected: false,
-    aiAvailable: false,
+    aiAvailable:  false,
+    mt5Mode:      'cloud',
   });
 
-  // One-shot: full REST fetch (used on mount and as manual fallback)
   const refresh = useCallback(async () => {
     try {
       const health = await api.health();
       setState(prev => ({
         ...prev,
         health,
-        loading: false,
-        error: null,
+        loading:      false,
+        error:        null,
         mt5Connected: health.mt5_connected,
-        aiAvailable: health.ai_available,
+        aiAvailable:  health.ai_available,
+        mt5Mode:      health.mt5_mode || 'cloud',
       }));
     } catch (err) {
       setState(prev => ({ ...prev, loading: false, error: err.message }));
@@ -225,11 +221,11 @@ export function useDashboard() {
 
   useEffect(() => {
     refresh();
-    // Lightweight health ping every 30s (just checks MT5 + AI status)
-    const timer = setInterval(refresh, 30000);
+    // 60s ping — WS pushes all real-time data so this just monitors
+    // backend health; we don't need it more often than once a minute.
+    const timer = setInterval(refresh, 60_000);
     return () => clearInterval(timer);
   }, [refresh]);
 
   return { ...state, refresh };
 }
-

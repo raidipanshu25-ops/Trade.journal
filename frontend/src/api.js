@@ -44,7 +44,49 @@ export const authApi = {
   googleLogin: (token) => apiFetch('/auth/google', {
     method: 'POST',
     body: JSON.stringify({ token }),
-  })
+  }),
+  register: (username, email, password) => apiFetch('/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ username, email, password }),
+  }),
+  verify2FA: (code, temp_token = '') => apiFetch('/auth/2fa/verify', {
+    method: 'POST',
+    body: JSON.stringify({ code, temp_token }),
+  }),
+  getMe: () => apiFetch('/auth/me'),
+  changePassword: (current_password, new_password) => apiFetch('/auth/change-password', {
+    method: 'PUT',
+    body: JSON.stringify({ current_password, new_password }),
+  }),
+  logout: () => apiFetch('/auth/logout', { method: 'POST' }),
+  getSessions: () => apiFetch('/auth/sessions'),
+  revokeSession: (sessionId) => apiFetch(`/auth/sessions/${sessionId}`, { method: 'DELETE' }),
+  setup2FA: () => apiFetch('/auth/2fa/setup', { method: 'POST' }),
+  disable2FA: (code) => apiFetch('/auth/2fa/disable', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  }),
+};
+
+export const adminApi = {
+  getUsers: () => apiFetch('/admin/users'),
+  createUser: (data) => apiFetch('/admin/users', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  updateRole: (userId, role) => apiFetch(`/admin/users/${userId}/role`, {
+    method: 'PUT',
+    body: JSON.stringify({ role }),
+  }),
+  updateStatus: (userId, status) => apiFetch(`/admin/users/${userId}/status`, {
+    method: 'PUT',
+    body: JSON.stringify({ status }),
+  }),
+  resetPassword: (userId, new_password) => apiFetch(`/admin/users/${userId}/reset-password`, {
+    method: 'PUT',
+    body: JSON.stringify({ new_password }),
+  }),
+  deleteUser: (userId) => apiFetch(`/admin/users/${userId}`, { method: 'DELETE' }),
 };
 
 export const api = {
@@ -81,7 +123,7 @@ export const api = {
     body: JSON.stringify(settings),
   }),
 
-  // Trading Journal
+  // AI Powered Trading Journal & Analytics
   journalTrades: (options = {}) => {
     const params = new URLSearchParams();
     if (options.limit) params.append('limit', options.limit);
@@ -119,4 +161,23 @@ export const api = {
     return `/api/chart/export${params.toString() ? `?${params}` : ''}`;
   },
   chartDelete: (id) => apiFetch(`/chart/snapshot/${id}`, { method: 'DELETE' }),
+
+  // MT5 Accounts (MetaAPI cloud)
+  mt5Accounts: () => apiFetch('/mt5-accounts'),
+  addMt5Account: (payload) => apiFetch('/mt5-accounts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+  deleteMt5Account: (id) => apiFetch(`/mt5-accounts/${id}`, { method: 'DELETE' }),
+  syncMt5Account: (id) => apiFetch(`/mt5-accounts/${id}/sync`, { method: 'POST' }),
+  deployMt5Account: (id) => apiFetch(`/mt5-accounts/${id}/deploy`, { method: 'POST' }),
+
+  // MT5 Access Controller (prop-firm safe gatekeeper)
+  mt5AccessStatus: () => apiFetch('/mt5-access/status'),
+  mt5AccessOverride: (action) => apiFetch('/mt5-access/override', {
+    method: 'POST',
+    body: JSON.stringify({ action }),
+  }),
+  mt5AccessForceOpen: () => apiFetch('/mt5-access/force-open', { method: 'POST' }),
+  mt5AccessReset: () => apiFetch('/mt5-access/reset', { method: 'POST' }),
 };

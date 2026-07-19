@@ -1,6 +1,6 @@
 """
-MT5 Trading Journal — FastAPI Backend
-======================================
+📈 AI Powered Trading Journal & Analytics — FastAPI Backend
+==========================================================
 Serves the dashboard frontend and exposes REST APIs for:
 - MT5 account & trade data
 - Discipline rule checking & alerts
@@ -10,39 +10,91 @@ Serves the dashboard frontend and exposes REST APIs for:
 import logging
 import asyncio
 import json
+import time
 from datetime import datetime, timezone, timedelta
 
-IST = timezone(timedelta(hours=5, minutes=30))  # Indian Standard Time (UTC+5:30)
+from config import get_local_tz
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from config import load_settings, save_settings, MT5_PATH, HOST, PORT, ADMIN_PASSWORD, GOOGLE_CLIENT_ID, AUTHORIZED_EMAILS
-from auth import create_access_token, verify_ws_token, hash_password, verify_password
+from config import load_settings, save_settings, METAAPI_TOKEN, HOST, PORT, ADMIN_PASSWORD, GOOGLE_CLIENT_ID, AUTHORIZED_EMAILS, MT5_MODE, MT5_PATH, ALLOW_REGISTRATION, SECRET_KEY
+from auth import (create_access_token, verify_ws_token, hash_password, verify_password,
+                  hash_token, extract_user_from_token, generate_totp_secret, verify_totp,
+                  get_totp_provisioning_uri, generate_qr_code_base64)
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
-from mt5_service import MT5Service
+import metaapi_service as ma
 from discipline_checker import DisciplineChecker
 from ai_analyzer import AIAnalyzer
 from vision_analyzer import VisionAnalyzer
-from models import RulesConfig, AIAnalysisRequest
+from models import RulesConfig, AIAnalysisRequest, MT5AccountCreate
 import database as db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── Security warnings ───────────────────────────────────────────────
+if SECRET_KEY == "tj-default-insecure-secret-key-change-in-production":
+    logger.warning(
+        "⚠️  SECRET_KEY is using the insecure default value! "
+        "Set a strong random SECRET_KEY in backend/.env before exposing "
+        "this server to the network."
+    )
+
+# ── In-memory response cache (avoids re-running heavy DB queries) ───
+# journal_stats:  30 s TTL  (stats screen, WS full tick)
+# analytics:      30 s TTL  (Account Analysis page)
+_CACHE: dict = {}   # key -> (value, expires_at)
+
+
+def _cache_get(key: str):
+    """Return cached value or None if expired / not set."""
+    entry = _CACHE.get(key)
+    if entry and time.monotonic() < entry[1]:
+        return entry[0]
+    return None
+
+
+def _cache_set(key: str, value, ttl: float):
+    """Store value in cache with TTL seconds."""
+    _CACHE[key] = (value, time.monotonic() + ttl)
+
+
+def _cache_invalidate(key: str):
+    """Remove a key from cache (call after a write operation)."""
+    _CACHE.pop(key, None)
+
+# Local MT5 desktop service (only used when MT5_MODE == "local")
+_mt5_local = None
+_discipline_local = None
+if MT5_MODE == "local":
+    try:
+        from mt5_service import MT5Service
+        _mt5_local = MT5Service(MT5_PATH)
+        _discipline_local = DisciplineChecker(_mt5_local)
+        logger.info("MT5 local mode enabled — will connect to desktop terminal.")
+    except ImportError:
+        logger.warning("MetaTrader5 package not installed — falling back to cloud mode.")
+else:
+    logger.info("MT5 cloud mode enabled — using MetaAPI.")
+
 # ------------------------------------------------------------------ #
 #  Global services
 # ------------------------------------------------------------------ #
-mt5 = MT5Service(mt5_path=MT5_PATH)
-checker = DisciplineChecker(mt5)
 ai = AIAnalyzer()
 vision = VisionAnalyzer()
+
+# MT5 Access Controller (prop-firm safe gatekeeper)
+from mt5_access_controller import MT5AccessController
+_mt5_access = MT5AccessController(mt5_service=_mt5_local, db_module=db)
+_mt5_access.configure(MT5_PATH)
 
 # Chart screenshots storage
 CHART_SCREENSHOTS_DIR = Path(__file__).parent / "chart_screenshots"
@@ -53,169 +105,176 @@ CHART_SCREENSHOTS_DIR.mkdir(exist_ok=True)
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
     db.init_db()
-    
-    # Seed default admin user from .env if missing
     if ADMIN_PASSWORD and not db.get_user_by_username("admin"):
         logger.info("Seeding initial admin user from .env")
         db.create_user("admin", "admin@local", hash_password(ADMIN_PASSWORD), "admin")
-    logger.info("Backend started — use the dashboard to connect to MT5")
-    # Start background trade logger
-    task = asyncio.create_task(trade_sync_loop())
+
+    # Connect based on mode
+    if MT5_MODE == "local" and _mt5_local:
+        ok = _mt5_local.connect()
+        if ok:
+            logger.info("✅ Local MT5 desktop terminal connected successfully.")
+        else:
+            logger.warning("⚠️ Local MT5 terminal not connected — is MetaTrader 5 running?")
+    else:
+        if not METAAPI_TOKEN:
+            logger.warning("METAAPI_TOKEN not set — MT5 cloud sync disabled. Set it in backend/.env")
+        else:
+            logger.info("MetaAPI token found — cloud-based MT5 sync enabled.")
+
+    # Background sync loop
+    task = asyncio.create_task(_background_sync_loop())
+    # MT5 Access Controller loop
+    access_task = asyncio.create_task(_mt5_access_loop())
     yield
     task.cancel()
-    mt5.disconnect()
+    access_task.cancel()
+    # Disconnect local MT5 on shutdown
+    if MT5_MODE == "local" and _mt5_local:
+        _mt5_local.disconnect()
     logger.info("Backend shutdown")
 
+_history_updated_flag = False
 
-async def trade_sync_loop():
-    """Background loop: detect closed trades and save them to the journal every 30s."""
+async def _background_sync_loop():
+    """Every 60 s: sync trade data (local MT5 or MetaAPI cloud)."""
+    global _history_updated_flag
     while True:
         try:
-            if mt5.is_connected:
-                # Regular background loop only checks today's trades
-                sync_closed_trades(days_back=1)
+            if MT5_MODE == "local" and _mt5_local:
+                # Local mode: only sync FULLY CLOSED positions
+                if _mt5_local.is_connected:
+                    import MetaTrader5 as _mt5_api
+                    # 1. Build set of position tickets that are still open
+                    open_positions = _mt5_local.get_open_positions()
+                    open_pids = {p['ticket'] for p in open_positions}
+
+                    # 2. Get last 7 days of deals (covers cross-day trades)
+                    now = datetime.now(get_local_tz())
+                    sync_start = now - timedelta(days=7)
+                    deals = _mt5_local.get_deals(sync_start, now)
+                    pos_map = {}
+                    for d in deals:
+                        pid = d.get("position_id", d.get("ticket", 0))
+                        if pid not in pos_map:
+                            pos_map[pid] = {"in": None, "outs": []}
+                        if d.get("entry") == 0:
+                            pos_map[pid]["in"] = d
+                        elif d.get("entry") in (1, 3):  # 1=OUT, 3=OUT_BY (hedge-close)
+                            pos_map[pid]["outs"].append(d)
+
+                    synced_count = 0
+                    for pid, pdata in pos_map.items():
+                        # Skip positions that are still open (partially closed)
+                        if pid in open_pids:
+                            continue
+                        if not pdata["outs"]:
+                            continue
+                        outs = sorted(pdata["outs"], key=lambda x: x.get("time", ""))
+                        last_out = outs[-1]
+                        agg = last_out.copy()
+                        # Include IN deal's commission/swap (brokers split commission across entry+exit deals)
+                        in_comm = pdata["in"].get("commission", 0) if pdata["in"] else 0
+                        in_swap = pdata["in"].get("swap", 0) if pdata["in"] else 0
+                        agg["profit"] = round(sum(o.get("profit", 0) for o in outs), 2)
+                        agg["commission"] = round(sum(o.get("commission", 0) for o in outs) + in_comm, 2)
+                        agg["swap"] = round(sum(o.get("swap", 0) for o in outs) + in_swap, 2)
+                        agg["volume"] = round(sum(o.get("volume", 0) for o in outs), 2)
+                        agg["position_id"] = pid
+                        agg["close_time"] = last_out.get("time", "")
+                        agg["close_price"] = last_out.get("price", 0)
+                        agg["date"] = agg["close_time"][:10] if agg["close_time"] else now.strftime("%Y-%m-%d")
+
+                        if pdata["in"]:
+                            agg["open_price"] = pdata["in"].get("price", 0)
+                            agg["open_time"] = pdata["in"].get("time", "")
+                            agg["type"] = pdata["in"].get("type", agg.get("type", ""))
+                            try:
+                                in_t = datetime.fromisoformat(pdata["in"]["time"])
+                                out_t = datetime.fromisoformat(last_out["time"])
+                                agg["duration_minutes"] = (out_t - in_t).total_seconds() / 60.0
+                            except Exception:
+                                agg["duration_minutes"] = 0.0
+                        else:
+                            # Cross-day trade: IN deal not in the 7-day window — fetch from MT5 directly
+                            try:
+                                pid_deals = _mt5_api.history_deals_get(position=pid)
+                                if pid_deals:
+                                    for raw_d in pid_deals:
+                                        if raw_d.entry == 0:  # IN deal
+                                            in_time = datetime.fromtimestamp(raw_d.time, tz=get_local_tz()).isoformat()
+                                            agg["open_price"] = raw_d.price
+                                            agg["open_time"] = in_time
+                                            agg["type"] = "BUY" if raw_d.type == 0 else "SELL"
+                                            try:
+                                                in_t = datetime.fromisoformat(in_time)
+                                                out_t = datetime.fromisoformat(last_out["time"])
+                                                agg["duration_minutes"] = (out_t - in_t).total_seconds() / 60.0
+                                            except Exception:
+                                                agg["duration_minutes"] = 0.0
+                                            break
+                            except Exception as e:
+                                logger.debug(f"Cross-day IN deal lookup failed for pid={pid}: {e}")
+
+                        result = db.upsert_trade_by_position(pid, agg)
+                        if result in ("inserted", "updated"):
+                            synced_count += 1
+                    if synced_count > 0:
+                        _history_updated_flag = True
+                        _cache_invalidate("journal_stats")
+                        _cache_invalidate("analytics")
+                        logger.info(f"Background sync: {synced_count} trades synced (new/updated)")
+                accounts = db.get_mt5_accounts()
+                for acc in accounts:
+                    if acc.get("metaapi_account_id"):
+                        try:
+                            cloud_state = await ma.get_account_state(acc["metaapi_account_id"])
+                            new_state = cloud_state.get("state", acc.get("state", "DEPLOYING"))
+                            new_conn = cloud_state.get("connectionStatus", acc.get("connection_status", "DISCONNECTED"))
+                            if new_state != acc.get("state") or new_conn != acc.get("connection_status"):
+                                db.update_mt5_account_status(acc["id"], new_state, new_conn)
+                                logger.info(f"Account {acc['id']} state updated: {new_state}/{new_conn}")
+                        except Exception as e:
+                            logger.debug(f"State poll error for account {acc['id']}: {e}")
+                        try:
+                            closed = await ma.sync_all_history(acc["metaapi_account_id"], days_back=3)
+                            for deal in closed:
+                                db.upsert_trade_by_position(deal.get("position_id", 0), deal)
+                        except Exception as e:
+                            logger.debug(f"Background sync error for account {acc['id']}: {e}")
         except Exception as e:
-            logger.warning(f"Trade sync error: {e}")
-        await asyncio.sleep(30)
-
-
-def sync_closed_trades(days_back: int = 0):
-    """Fetch closed deals from MT5 and upsert the journal DB.
-
-    Partial-close aware:
-      - ALL OUT deals for the same position_id are aggregated into one record.
-      - If an earlier partial close is already in the DB, the final (or any later)
-        close **updates** that record's profit/volume/close_time in-place.
-      - A position with only partial closes so far will have a record whose profit
-        reflects the sum of all closes completed up to this moment.
-    """
-    import MetaTrader5 as mt5_lib
-    from datetime import timedelta
-
-    now = datetime.now(IST)
-    if days_back == 0:
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    else:
-        start = (now - timedelta(days=days_back)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-
-    deals = mt5.get_deals(start, now)
-
-    # ── Group deals by position_id, collecting ALL in/out deals ──────────
-    pos_map: dict[int, dict] = {}
-    for d in deals:
-        pid = d["position_id"]
-        if pid not in pos_map:
-            pos_map[pid] = {"in": None, "outs": []}
-        if d["entry"] == 0:          # IN deal — trade entry
-            pos_map[pid]["in"] = d
-        elif d["entry"] == 1:        # OUT deal — full or partial close
-            pos_map[pid]["outs"].append(d)
-
-    closed = []
-    for pid, pdata in pos_map.items():
-        if not pdata["outs"]:
-            continue  # Position still open — skip
-
-        in_deal = pdata["in"]
-        # Sort by time so we process partial closes chronologically
-        outs_sorted = sorted(pdata["outs"], key=lambda x: x.get("time", ""))
-        last_out = outs_sorted[-1]  # Most recent closing deal
-
-        # ── Resolve IN deal for cross-day positions ───────────────────────
-        if in_deal is None and pid > 0:
-            try:
-                pid_deals = mt5_lib.history_deals_get(position=pid)
-                if pid_deals:
-                    for d in pid_deals:
-                        if d.entry == 0:
-                            in_deal = {
-                                "price":  d.price,
-                                "time":   datetime.fromtimestamp(
-                                    d.time, tz=IST
-                                ).isoformat(),
-                                "type":   "BUY" if d.type == 0 else "SELL",
-                                "symbol": d.symbol,
-                                "volume": d.volume,
-                            }
-                            break
-            except Exception as e:
-                logger.warning(f"Failed to fetch IN deal for position {pid}: {e}")
-
-        # ── Aggregate across ALL out deals for this position ──────────────
-        total_profit     = round(sum(d.get("profit",     0) for d in outs_sorted), 2)
-        total_commission = round(sum(d.get("commission", 0) for d in outs_sorted), 2)
-        total_swap       = round(sum(d.get("swap",       0) for d in outs_sorted), 2)
-        total_volume     = round(sum(d.get("volume",     0) for d in outs_sorted), 2)
-
-        # ── Build the canonical trade record ──────────────────────────────
-        agg = last_out.copy()
-        agg["profit"]      = total_profit
-        agg["commission"]  = total_commission
-        agg["swap"]        = total_swap
-        agg["volume"]      = total_volume
-        agg["position_id"] = pid
-
-        # Position TYPE comes from the IN deal (buy/sell direction)
-        if in_deal and in_deal.get("type"):
-            agg["type"] = in_deal["type"]
-
-        agg["close_time"]  = last_out["time"]
-        agg["close_price"] = last_out.get("price", 0)
-        date_str = agg["close_time"][:10] if agg["close_time"] else now.strftime("%Y-%m-%d")
-        agg["date"] = date_str
-
-        if in_deal:
-            agg["open_price"] = in_deal.get("price", 0)
-            agg["open_time"]  = in_deal.get("time", "")
-            try:
-                in_t  = datetime.fromisoformat(in_deal["time"])
-                out_t = datetime.fromisoformat(last_out["time"])
-                agg["duration_minutes"] = (out_t - in_t).total_seconds() / 60.0
-            except Exception:
-                agg["duration_minutes"] = 0.0
-        else:
-            agg["open_price"]      = 0
-            agg["open_time"]       = ""
-            agg["duration_minutes"] = 0.0
-
-        closed.append(agg)
-
-    if not closed:
-        return
-
-    saved_count   = 0
-    updated_count = 0
-    closed.sort(key=lambda x: x["close_time"])
-
-    for deal in closed:
-        pid    = deal.get("position_id", 0)
-        result = db.upsert_trade_by_position(pid, deal)
-        if result == "inserted":
-            saved_count   += 1
-        elif result == "updated":
-            updated_count += 1
-
-    if saved_count > 0 or updated_count > 0:
-        logger.info(
-            f"Trade sync: {saved_count} inserted, {updated_count} updated "
-            f"(days_back={days_back})"
-        )
-
+            logger.warning(f"Sync loop error: {e}")
+        await asyncio.sleep(60)
 
 
 app = FastAPI(
-    title="MT5 Trading Journal",
+    title="📈 AI Powered Trading Journal & Analytics",
     version="1.0.0",
     lifespan=lifespan,
 )
 
+# ── GZip all REST responses ≥ 1 KB automatically ────────────────────
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# ── CORS — allow localhost + any device on the local network ─────────
+# Regex matches:
+#   http(s)://localhost:<port>
+#   http(s)://127.0.0.1:<port>
+#   http(s)://192.168.x.x:<port>   (home/office LAN)
+#   http(s)://10.x.x.x:<port>      (corporate LAN)
+#   http(s)://172.16-31.x.x:<port> (docker / VPN ranges)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=(
+        r"https?://(localhost|127\.0\.0\.1"
+        r"|192\.168\.\d{1,3}\.\d{1,3}"
+        r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|172\.(1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}"
+        r")(:\d{1,5})?"
+    ),
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 @app.middleware("http")
@@ -224,10 +283,11 @@ async def check_auth_middleware(request: Request, call_next):
         return await call_next(request)
     
     path = request.url.path
-    if path.startswith("/api/") and path not in ["/api/auth/login", "/api/auth/google", "/api/health"]:
-        # Allow chart images to bypass auth if needed? Usually better to use query tokens for images, but for now we protect APIs.
+    public_paths = ["/api/auth/login", "/api/auth/google", "/api/auth/register", "/api/health"]
+    
+    if path.startswith("/api/") and path not in public_paths:
         if path.startswith("/api/chart/image/"):
-             pass # Maybe auth is good, frontend fetches via img src which doesn't send headers easily. We'll skip auth for images for easier UI loading.
+            pass
         else:
             auth_header = request.headers.get("Authorization")
             if not auth_header or not auth_header.startswith("Bearer "):
@@ -236,6 +296,24 @@ async def check_auth_middleware(request: Request, call_next):
             token = auth_header.split(" ")[1]
             if not verify_ws_token(token):
                 return JSONResponse(status_code=401, content={"detail": "Invalid or expired token"})
+            
+            # Check session revocation
+            token_h = hash_token(token)
+            if not db.is_session_active(token_h):
+                return JSONResponse(status_code=401, content={"detail": "Session has been revoked"})
+            
+            db.touch_session(token_h)
+            
+            # Role-based access: viewers cannot use write endpoints
+            payload = extract_user_from_token(token)
+            if payload and payload.get("role") == "viewer":
+                if request.method in ("POST", "PUT", "DELETE") and not path.startswith("/api/auth/"):
+                    return JSONResponse(status_code=403, content={"detail": "Viewer accounts have read-only access"})
+            
+            # Admin-only endpoints
+            if path.startswith("/api/admin/"):
+                if not payload or payload.get("role") != "admin":
+                    return JSONResponse(status_code=403, content={"detail": "Admin access required"})
             
     return await call_next(request)
 
@@ -249,21 +327,33 @@ class LoginRequest(BaseModel):
     password: str
 
 @app.post("/api/auth/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
     user = db.get_user_by_username(req.username)
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect credentials")
+    if user.get("status") == "deactivated":
+        raise HTTPException(status_code=403, detail="Account has been deactivated")
     if not verify_password(req.password, user.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Incorrect credentials")
     
-    token = create_access_token({"sub": user["username"], "role": user.get("role", "user")})
-    return {"token": token, "username": user["username"]}
+    if user.get("totp_enabled"):
+        temp_token = create_access_token(
+            {"sub": user["username"], "user_id": user["id"], "role": user.get("role", "user"), "pending_2fa": True},
+            expires_delta=timedelta(minutes=5)
+        )
+        return {"requires_2fa": True, "temp_token": temp_token}
+    
+    token = create_access_token({"sub": user["username"], "user_id": user["id"], "role": user.get("role", "user")})
+    device_info = request.headers.get("User-Agent", "Unknown")
+    ip_address = request.client.host if request.client else "unknown"
+    db.create_session(user["id"], hash_token(token), device_info, ip_address)
+    return {"token": token, "username": user["username"], "role": user.get("role", "user")}
 
 class GoogleLoginRequest(BaseModel):
     token: str
 
 @app.post("/api/auth/google")
-def google_login(req: GoogleLoginRequest):
+def google_login(req: GoogleLoginRequest, request: Request):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=400, detail="Google SSO not configured on server")
     try:
@@ -282,11 +372,294 @@ def google_login(req: GoogleLoginRequest):
                 role="user"
             )
             user = db.get_user_by_email(email)
+        
+        if user.get("status") == "deactivated":
+            raise HTTPException(status_code=403, detail="Account has been deactivated")
             
-        token = create_access_token({"sub": user["username"], "role": user.get("role", "user")})
-        return {"token": token, "username": user["username"]}
+        token = create_access_token({"sub": user["username"], "user_id": user["id"], "role": user.get("role", "user")})
+        device_info = request.headers.get("User-Agent", "Unknown")
+        ip_address = request.client.host if request.client else "unknown"
+        db.create_session(user["id"], hash_token(token), device_info, ip_address)
+        return {"token": token, "username": user["username"], "role": user.get("role", "user")}
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid Google token")
+
+
+# ------------------------------------------------------------------ #
+#  Auth — Registration, Password, Sessions, 2FA
+# ------------------------------------------------------------------ #
+
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+@app.post("/api/auth/register")
+def register(req: RegisterRequest):
+    if not ALLOW_REGISTRATION:
+        raise HTTPException(status_code=403, detail="Registration is disabled")
+    if not req.username or len(req.username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if not req.email or "@" not in req.email:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    if not req.password or len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if db.get_user_by_username(req.username):
+        raise HTTPException(status_code=409, detail="Username already taken")
+    if db.get_user_by_email(req.email):
+        raise HTTPException(status_code=409, detail="Email already registered")
+    
+    pw_hash = hash_password(req.password)
+    db.create_user(req.username, req.email, pw_hash, "user")
+    user = db.get_user_by_username(req.username)
+    token = create_access_token({"sub": user["username"], "user_id": user["id"], "role": "user"})
+    return {"token": token, "username": user["username"], "role": "user"}
+
+
+@app.get("/api/auth/me")
+def get_me(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = extract_user_from_token(auth_header.split(" ")[1])
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = db.get_user_by_username(payload.get("sub", ""))
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "email": user["email"],
+        "role": user.get("role", "user"),
+        "status": user.get("status", "active"),
+        "totp_enabled": bool(user.get("totp_enabled", 0)),
+        "created_at": user.get("created_at", ""),
+    }
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+@app.put("/api/auth/change-password")
+def change_password(req: ChangePasswordRequest, request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    payload = extract_user_from_token(auth_header.split(" ")[1] if " " in auth_header else "")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = db.get_user_by_username(payload["sub"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.get("password_hash") == "sso":
+        raise HTTPException(status_code=400, detail="SSO accounts cannot change password here")
+    if not verify_password(req.current_password, user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if len(req.new_password) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+    db.update_user_password(user["id"], hash_password(req.new_password))
+    return {"status": "ok", "message": "Password changed successfully"}
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+        token_h = hash_token(token)
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE sessions SET is_active = 0 WHERE token_hash = ?", (token_h,))
+        conn.commit()
+        conn.close()
+    return {"status": "ok", "message": "Logged out"}
+
+
+@app.get("/api/auth/sessions")
+def get_sessions(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    payload = extract_user_from_token(auth_header.split(" ")[1] if " " in auth_header else "")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = db.get_user_by_username(payload["sub"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    sessions = db.get_user_sessions(user["id"])
+    current_hash = hash_token(auth_header.split(" ")[1])
+    for s in sessions:
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT token_hash FROM sessions WHERE id = ?", (s["id"],))
+        row = cursor.fetchone()
+        conn.close()
+        s["is_current"] = bool(row and row["token_hash"] == current_hash)
+    return sessions
+
+
+@app.delete("/api/auth/sessions/{session_id}")
+def revoke_session_endpoint(session_id: str):
+    db.revoke_session(session_id)
+    return {"status": "ok", "message": "Session revoked"}
+
+
+@app.post("/api/auth/2fa/setup")
+def setup_2fa(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    payload = extract_user_from_token(auth_header.split(" ")[1] if " " in auth_header else "")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = db.get_user_by_username(payload["sub"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.get("totp_enabled"):
+        raise HTTPException(status_code=400, detail="2FA is already enabled")
+    secret = generate_totp_secret()
+    if not secret:
+        raise HTTPException(status_code=500, detail="2FA not available (pyotp not installed)")
+    db.set_user_totp(user["id"], secret)
+    uri = get_totp_provisioning_uri(secret, user["username"])
+    qr_code = generate_qr_code_base64(uri)
+    return {"secret": secret, "uri": uri, "qr_code": qr_code}
+
+
+class Verify2FARequest(BaseModel):
+    code: str
+    temp_token: str = ""
+
+@app.post("/api/auth/2fa/verify")
+def verify_2fa_endpoint(req: Verify2FARequest, request: Request):
+    if req.temp_token:
+        payload = extract_user_from_token(req.temp_token)
+        if not payload or not payload.get("pending_2fa"):
+            raise HTTPException(status_code=401, detail="Invalid or expired 2FA token")
+        user = db.get_user_by_username(payload["sub"])
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        if not verify_totp(user.get("totp_secret", ""), req.code):
+            raise HTTPException(status_code=401, detail="Invalid 2FA code")
+        token = create_access_token({"sub": user["username"], "user_id": user["id"], "role": user.get("role", "user")})
+        device_info = request.headers.get("User-Agent", "Unknown")
+        ip_address = request.client.host if request.client else "unknown"
+        db.create_session(user["id"], hash_token(token), device_info, ip_address)
+        return {"token": token, "username": user["username"], "role": user.get("role", "user")}
+    else:
+        auth_header = request.headers.get("Authorization", "")
+        payload = extract_user_from_token(auth_header.split(" ")[1] if " " in auth_header else "")
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user = db.get_user_by_username(payload["sub"])
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        if not user.get("totp_secret"):
+            raise HTTPException(status_code=400, detail="Run 2FA setup first")
+        if not verify_totp(user["totp_secret"], req.code):
+            raise HTTPException(status_code=401, detail="Invalid 2FA code")
+        db.enable_user_totp(user["id"])
+        return {"status": "ok", "message": "2FA enabled successfully"}
+
+
+class Disable2FARequest(BaseModel):
+    code: str
+
+@app.post("/api/auth/2fa/disable")
+def disable_2fa(req: Disable2FARequest, request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    payload = extract_user_from_token(auth_header.split(" ")[1] if " " in auth_header else "")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = db.get_user_by_username(payload["sub"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not user.get("totp_enabled"):
+        raise HTTPException(status_code=400, detail="2FA is not enabled")
+    if not verify_totp(user.get("totp_secret", ""), req.code):
+        raise HTTPException(status_code=401, detail="Invalid 2FA code")
+    db.disable_user_totp(user["id"])
+    return {"status": "ok", "message": "2FA disabled"}
+
+
+# ------------------------------------------------------------------ #
+#  Admin — User Management
+# ------------------------------------------------------------------ #
+
+@app.get("/api/admin/users")
+def admin_list_users():
+    users = db.get_all_users()
+    enriched = []
+    for u in users:
+        full = db.get_user_by_username(u["username"])
+        enriched.append({
+            "id": u["id"], "username": u["username"], "email": u["email"], "role": u["role"],
+            "status": full.get("status", "active") if full else "active",
+            "totp_enabled": bool(full.get("totp_enabled", 0)) if full else False,
+            "created_at": u["created_at"],
+        })
+    return enriched
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    role: str = "user"
+
+@app.post("/api/admin/users")
+def admin_create_user(req: AdminCreateUserRequest):
+    if db.get_user_by_username(req.username):
+        raise HTTPException(status_code=409, detail="Username already taken")
+    if db.get_user_by_email(req.email):
+        raise HTTPException(status_code=409, detail="Email already registered")
+    if req.role not in ("admin", "user", "viewer"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    pw_hash = hash_password(req.password)
+    db.create_user(req.username, req.email, pw_hash, req.role)
+    return {"status": "ok", "username": req.username}
+
+
+class AdminUpdateRoleRequest(BaseModel):
+    role: str
+
+@app.put("/api/admin/users/{user_id}/role")
+def admin_update_role(user_id: int, req: AdminUpdateRoleRequest):
+    if req.role not in ("admin", "user", "viewer"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    db.update_user_role(user_id, req.role)
+    return {"status": "ok"}
+
+
+class AdminUpdateStatusRequest(BaseModel):
+    status: str
+
+@app.put("/api/admin/users/{user_id}/status")
+def admin_update_status(user_id: int, req: AdminUpdateStatusRequest):
+    if req.status not in ("active", "deactivated"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    db.update_user_status(user_id, req.status)
+    if req.status == "deactivated":
+        db.revoke_all_sessions(user_id)
+    return {"status": "ok"}
+
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str
+
+@app.put("/api/admin/users/{user_id}/reset-password")
+def admin_reset_password(user_id: int, req: AdminResetPasswordRequest):
+    if len(req.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    db.update_user_password(user_id, hash_password(req.new_password))
+    db.revoke_all_sessions(user_id)
+    return {"status": "ok", "message": "Password reset and all sessions revoked"}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: int, request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    payload = extract_user_from_token(auth_header.split(" ")[1] if " " in auth_header else "")
+    if payload and payload.get("user_id") == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    db.delete_user(user_id)
+    return {"status": "ok", "message": "User deleted"}
 
 
 # ------------------------------------------------------------------ #
@@ -294,86 +667,286 @@ def google_login(req: GoogleLoginRequest):
 # ------------------------------------------------------------------ #
 @app.get("/api/health")
 def health():
+    accounts = db.get_mt5_accounts()
+    if MT5_MODE == "local" and _mt5_local:
+        mt5_connected = _mt5_local.is_connected
+    else:
+        mt5_connected = len(accounts) > 0
     return {
         "status": "ok",
-        "mt5_connected": mt5.is_connected,
+        "mt5_mode": MT5_MODE,
+        "mt5_connected": mt5_connected,
+        "metaapi_configured": bool(METAAPI_TOKEN),
         "ai_available": ai.is_available,
         "auth_required": bool(ADMIN_PASSWORD),
-        "timestamp": datetime.now(IST).isoformat(),
+        "connected_accounts": len(accounts),
+        "timestamp": datetime.now(get_local_tz()).isoformat(),
     }
 
 
 @app.post("/api/mt5/reconnect")
-def reconnect_mt5():
-    """Attempt to reconnect to MT5 terminal."""
-    success = mt5.connect()
-    return {"connected": success}
+def mt5_reconnect():
+    """Reconnect to the local MT5 desktop terminal."""
+    if MT5_MODE != "local" or not _mt5_local:
+        raise HTTPException(400, "MT5 reconnect only available in local mode")
+    _mt5_local.disconnect()
+    ok = _mt5_local.connect()
+    return {"status": "connected" if ok else "failed", "mt5_connected": ok}
 
 
 # ------------------------------------------------------------------ #
-#  WebSocket — real-time live data stream (1 second push)
+#  MT5 Accounts — MetaAPI cloud (multi-account)
+# ------------------------------------------------------------------ #
+
+@app.get("/api/mt5-accounts")
+async def list_mt5_accounts():
+    """List all connected MT5 accounts, with live state from MetaAPI."""
+    accs = db.get_mt5_accounts()
+    result = []
+    for a in accs:
+        # Live-poll MetaAPI for current state if we have a metaapi_account_id
+        if a.get("metaapi_account_id") and METAAPI_TOKEN:
+            try:
+                cloud_state = await ma.get_account_state(a["metaapi_account_id"])
+                new_state = cloud_state.get("state", a.get("state", "DEPLOYING"))
+                new_conn = cloud_state.get("connectionStatus", a.get("connection_status", "DISCONNECTED"))
+                # Update DB if state changed
+                if new_state != a.get("state") or new_conn != a.get("connection_status"):
+                    db.update_mt5_account_status(a["id"], new_state, new_conn)
+                a["state"] = new_state
+                a["connection_status"] = new_conn
+            except Exception as e:
+                logger.debug(f"Failed to poll MetaAPI state for account {a['id']}: {e}")
+        # Don't expose raw passwords
+        result.append({k: v for k, v in a.items() if k != "password"})
+    return result
+
+
+@app.post("/api/mt5-accounts")
+async def add_mt5_account(req: MT5AccountCreate, background_tasks: BackgroundTasks):
+    """Provision a new MT5 account on MetaAPI cloud and store it."""
+    if not METAAPI_TOKEN:
+        raise HTTPException(400, "METAAPI_TOKEN not configured in .env")
+    try:
+        provisioned = await ma.provision_account(
+            login=str(req.login),
+            password=req.password,
+            server=req.server,
+        )
+        metaapi_id = provisioned.get("id", "")
+        acc = db.add_mt5_account(
+            user_id=0,
+            login=req.login,
+            password=req.password,
+            server=req.server,
+            metaapi_account_id=metaapi_id,
+        )
+        if acc:
+            acc.pop("password", None)
+
+        # Trigger deployment in the background and wait for it to be ready
+        async def _deploy_and_update():
+            try:
+                # Request deployment via MetaAPI
+                await ma.deploy_account(metaapi_id)
+                # Poll until DEPLOYED (up to 120s)
+                deployed = await ma.wait_until_deployed(metaapi_id, timeout_seconds=120)
+                if deployed:
+                    state = await ma.get_account_state(metaapi_id)
+                    db.update_mt5_account_status(
+                        acc["id"],
+                        state.get("state", "DEPLOYED"),
+                        state.get("connectionStatus", "CONNECTED"),
+                    )
+                    logger.info(f"MT5 account {req.login} deployed successfully.")
+                else:
+                    db.update_mt5_account_status(acc["id"], "DEPLOY_TIMEOUT", "DISCONNECTED")
+                    logger.warning(f"MT5 account {req.login} deployment timed out.")
+            except Exception as e:
+                logger.warning(f"Deploy+update error for account {req.login}: {e}")
+
+        background_tasks.add_task(_deploy_and_update)
+
+        return {"status": "provisioning", "account": acc, "metaapi_id": metaapi_id}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/mt5-accounts/{account_id}/deploy")
+async def deploy_mt5_account(account_id: int, background_tasks: BackgroundTasks):
+    """Manually trigger deployment for an account stuck in DEPLOYING state."""
+    accs = db.get_mt5_accounts()
+    acc = next((a for a in accs if a["id"] == account_id), None)
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if not acc.get("metaapi_account_id"):
+        raise HTTPException(400, "Account not yet provisioned on MetaAPI")
+
+    metaapi_id = acc["metaapi_account_id"]
+
+    async def _deploy():
+        try:
+            await ma.deploy_account(metaapi_id)
+            deployed = await ma.wait_until_deployed(metaapi_id, timeout_seconds=120)
+            if deployed:
+                state = await ma.get_account_state(metaapi_id)
+                db.update_mt5_account_status(
+                    account_id,
+                    state.get("state", "DEPLOYED"),
+                    state.get("connectionStatus", "CONNECTED"),
+                )
+            else:
+                db.update_mt5_account_status(account_id, "DEPLOY_TIMEOUT", "DISCONNECTED")
+        except Exception as e:
+            logger.warning(f"Manual deploy error for account {account_id}: {e}")
+
+    background_tasks.add_task(_deploy)
+    return {"status": "deploying", "account_id": account_id}
+
+
+@app.delete("/api/mt5-accounts/{account_id}")
+async def remove_mt5_account(account_id: int):
+    """Remove MT5 account from MetaAPI cloud and local DB."""
+    accs = db.get_mt5_accounts()
+    acc = next((a for a in accs if a["id"] == account_id), None)
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if acc.get("metaapi_account_id") and METAAPI_TOKEN:
+        await ma.delete_metaapi_account(acc["metaapi_account_id"])
+    db.delete_mt5_account(account_id)
+    return {"status": "removed", "id": account_id}
+
+
+@app.post("/api/mt5-accounts/{account_id}/sync")
+async def sync_mt5_account(account_id: int, background_tasks: BackgroundTasks):
+    """Manually trigger full history sync for one MT5 account."""
+    accs = db.get_mt5_accounts()
+    acc = next((a for a in accs if a["id"] == account_id), None)
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if not acc.get("metaapi_account_id"):
+        raise HTTPException(400, "Account not yet provisioned on MetaAPI")
+
+    async def _do_sync():
+        closed = await ma.sync_all_history(acc["metaapi_account_id"], days_back=3650)
+        synced = 0
+        for deal in closed:
+            r = db.upsert_trade_by_position(deal.get("position_id", 0), deal)
+            if r in ("inserted", "updated"):
+                synced += 1
+        logger.info(f"Manual sync account {account_id}: {synced} trades")
+
+    background_tasks.add_task(_do_sync)
+    return {"status": "syncing", "account_id": account_id}
+
+
+# ------------------------------------------------------------------ #
+#  WebSocket — real-time live data (local MT5 or MetaAPI cloud)
 # ------------------------------------------------------------------ #
 @app.websocket("/ws/live")
 async def websocket_live(ws: WebSocket, token: str = None):
-    """Push live data every ~1 second."""
+    """Push live data every ~3 seconds."""
     if not verify_ws_token(token):
         await ws.close(code=1008, reason="Unauthorized")
         return
-        
+
     await ws.accept()
     logger.info("WebSocket client connected")
-    last_tickets = None
     tick = 0
+    global _history_updated_flag
     try:
         while True:
-            tick = (tick % 3) + 1  # cycles 1 → 2 → 3 → 1 → ...
+            tick = (tick % 3) + 1
             try:
-                snapshot = mt5.get_live_snapshot()
+                if MT5_MODE == "local" and _mt5_local:
+                    # ── Local MT5 mode ──
+                    snap = _mt5_local.get_live_snapshot()
+                    hist_flag = _history_updated_flag
+                    if hist_flag:
+                        _history_updated_flag = False
+                    snapshot = {
+                        "connected": snap.get("connected", False),
+                        "account": snap.get("account"),
+                        "positions": snap.get("positions", []),
+                        "history_updated": hist_flag,
+                        "timestamp": datetime.now(get_local_tz()).isoformat(),
+                    }
 
-                # Detect closed positions for instant journal sync
-                current_tickets = set(p["ticket"] for p in snapshot.get("positions", []))
-                history_updated = False
-                if last_tickets is not None:
-                    if last_tickets - current_tickets:
-                        sync_closed_trades(days_back=1)
-                        history_updated = True
-                last_tickets = current_tickets
-                snapshot["history_updated"] = history_updated
+                    if tick == 3:
+                        # Full tick: add heavy data
+                        try:
+                            snapshot["daily_stats"] = _mt5_local.get_daily_stats()
+                        except Exception:
+                            pass
+                        try:
+                            snapshot["discipline"] = _discipline_local.run_all_checks() if _discipline_local else None
+                        except Exception:
+                            pass
+                        try:
+                            snapshot["journal_stats"] = db.get_journal_stats()
+                        except Exception:
+                            pass
+                        try:
+                            snapshot["analytics"] = db.get_advanced_analytics()
+                        except Exception:
+                            pass
+                        try:
+                            snapshot["mt5_access"] = _mt5_access.get_status()
+                        except Exception:
+                            pass
 
-                # Every 3rd tick: include heavy data (discipline + stats)
-                if tick == 3 and snapshot.get("connected"):
-                    try:
-                        snapshot["daily_stats"] = mt5.get_daily_stats()
-                    except Exception as e:
-                        logger.debug(f"WS daily_stats error: {e}")
+                    await ws.send_json(snapshot)
+                else:
+                    # ── Cloud mode (MetaAPI) ──
+                    accounts = db.get_mt5_accounts()
+                    if not accounts or not METAAPI_TOKEN:
+                        await ws.send_json({
+                            "connected": False,
+                            "positions": [],
+                            "account": None,
+                            "message": "No MT5 accounts connected. Add one in MT5 Accounts page.",
+                        })
+                    else:
+                        all_positions = []
+                        primary_account = None
+                        for acc in accounts:
+                            if not acc.get("metaapi_account_id"):
+                                continue
+                            snap = await ma.get_live_snapshot(acc["metaapi_account_id"])
+                            all_positions.extend(snap.get("positions", []))
+                            if primary_account is None and snap.get("account"):
+                                primary_account = snap["account"]
 
-                    try:
-                        report = checker.run_all_checks()
-                        snapshot["discipline"] = report
-                        # Persist discipline data
-                        today = datetime.now(IST).strftime("%Y-%m-%d")
-                        if report.get("alerts"):
-                            db.save_alerts(report["alerts"], today)
-                        daily = snapshot.get("daily_stats", {})
-                        db.save_daily_snapshot(today, daily, report.get("score", 100), report.get("total_violations", 0))
-                    except Exception as e:
-                        logger.debug(f"WS discipline error: {e}")
+                        hist_flag = _history_updated_flag
+                        if hist_flag:
+                            _history_updated_flag = False
+                        snapshot = {
+                            "connected": primary_account is not None,
+                            "account": primary_account,
+                            "positions": all_positions,
+                            "history_updated": hist_flag,
+                            "timestamp": datetime.now(get_local_tz()).isoformat(),
+                        }
 
-                    try:
-                        snapshot["journal_stats"] = db.get_journal_stats()
-                    except Exception as e:
-                        logger.debug(f"WS journal_stats error: {e}")
+                        if tick == 3:
+                            try:
+                                snapshot["journal_stats"] = db.get_journal_stats()
+                            except Exception:
+                                pass
+                            try:
+                                snapshot["analytics"] = db.get_advanced_analytics()
+                            except Exception:
+                                pass
+                            try:
+                                snapshot["mt5_access"] = _mt5_access.get_status()
+                            except Exception:
+                                pass
 
-                    try:
-                        snapshot["analytics"] = db.get_advanced_analytics()
-                    except Exception as e:
-                        logger.debug(f"WS analytics error: {e}")
-
-                await ws.send_json(snapshot)
+                        await ws.send_json(snapshot)
             except Exception as e:
-                logger.warning(f"WS snapshot error: {e}")
+                logger.warning(f"WS error: {e}")
                 await ws.send_json({"connected": False, "positions": [], "account": None, "error": str(e)})
-            await asyncio.sleep(1)
+            await asyncio.sleep(3)
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
     except Exception as e:
@@ -381,44 +954,75 @@ async def websocket_live(ws: WebSocket, token: str = None):
 
 
 # ------------------------------------------------------------------ #
-#  Fast REST fallback for position data (no discipline/stats overhead)
+#  Live snapshot REST fallback
 # ------------------------------------------------------------------ #
 @app.get("/api/positions-live")
-def get_positions_live():
-    """Lightweight endpoint: current positions + account equity only."""
-    return mt5.get_live_snapshot()
+async def get_positions_live():
+    if MT5_MODE == "local" and _mt5_local:
+        return _mt5_local.get_live_snapshot()
+    accounts = db.get_mt5_accounts()
+    if not accounts or not METAAPI_TOKEN:
+        return {"connected": False, "positions": [], "account": None}
+    snap = await ma.get_live_snapshot(accounts[0]["metaapi_account_id"])
+    return snap
 
 
 # ------------------------------------------------------------------ #
 #  Account info
 # ------------------------------------------------------------------ #
 @app.get("/api/account")
-def get_account():
-    info = mt5.get_account_info()
+async def get_account():
+    if MT5_MODE == "local" and _mt5_local:
+        info = _mt5_local.get_account_info()
+        if info is None:
+            raise HTTPException(503, "MT5 terminal not connected")
+        return info
+    accounts = db.get_mt5_accounts()
+    if not accounts or not METAAPI_TOKEN:
+        raise HTTPException(503, "No MT5 accounts configured")
+    info = await ma.get_account_info(accounts[0]["metaapi_account_id"])
     if info is None:
-        raise HTTPException(503, "MT5 not connected or account unavailable")
+        raise HTTPException(503, "Could not fetch account info from MetaAPI")
     return info
 
 
 # ------------------------------------------------------------------ #
-#  Positions & Trades
+#  Positions & Daily Stats
 # ------------------------------------------------------------------ #
 @app.get("/api/positions")
-def get_positions():
-    """Get all currently open positions."""
-    return mt5.get_open_positions()
+async def get_positions():
+    if MT5_MODE == "local" and _mt5_local:
+        return _mt5_local.get_open_positions()
+    accounts = db.get_mt5_accounts()
+    if not accounts or not METAAPI_TOKEN:
+        return []
+    positions = []
+    for acc in accounts:
+        if acc.get("metaapi_account_id"):
+            positions.extend(await ma.get_open_positions(acc["metaapi_account_id"]))
+    return positions
 
 
 @app.get("/api/daily-stats")
-def get_daily_stats():
-    """Get aggregated stats for today."""
-    return mt5.get_daily_stats()
+async def get_daily_stats():
+    if MT5_MODE == "local" and _mt5_local:
+        return _mt5_local.get_daily_stats()
+    accounts = db.get_mt5_accounts()
+    if not accounts or not METAAPI_TOKEN:
+        return {}
+    return await ma.get_daily_stats(accounts[0]["metaapi_account_id"])
 
 
 @app.get("/api/deals")
-def get_today_deals():
-    """Get all closed deals for today."""
-    return mt5.get_today_deals()
+async def get_today_deals():
+    if MT5_MODE == "local" and _mt5_local:
+        return _mt5_local.get_today_deals()
+    accounts = db.get_mt5_accounts()
+    if not accounts or not METAAPI_TOKEN:
+        return []
+    now = datetime.now(get_local_tz())
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return await ma.get_deals(accounts[0]["metaapi_account_id"], start, now)
 
 
 # ------------------------------------------------------------------ #
@@ -426,16 +1030,46 @@ def get_today_deals():
 # ------------------------------------------------------------------ #
 @app.get("/api/discipline/check")
 def run_discipline_check():
-    """Run all discipline checks and return the report."""
-    report = checker.run_all_checks()
-    today = datetime.now(IST).strftime("%Y-%m-%d")
+    """Run discipline checks — live checks in local mode, DB-based in cloud mode."""
+    today = datetime.now(get_local_tz()).strftime("%Y-%m-%d")
 
-    # Persist alerts and snapshot
-    if report["alerts"]:
-        db.save_alerts(report["alerts"], today)
-    stats = mt5.get_daily_stats() if mt5.is_connected else {}
-    db.save_daily_snapshot(today, stats, report["score"], report["total_violations"])
+    # In local mode: use full live discipline checker with real MT5 data
+    if MT5_MODE == "local" and _discipline_local and _mt5_local and _mt5_local.is_connected:
+        report = _discipline_local.run_all_checks()
+        if report.get("alerts"):
+            db.save_alerts(report["alerts"], today)
+        # Also save daily snapshot
+        try:
+            stats = _mt5_local.get_daily_stats()
+            db.save_daily_snapshot(today, {
+                "net_pnl": stats.get("net_pnl", 0),
+                "total_trades": stats.get("total_trades", 0),
+                "wins": stats.get("winning_trades", 0),
+            }, report.get("score", 100), report.get("total_violations", 0))
+        except Exception:
+            pass
+        return report
 
+    # Cloud / fallback: DB-based discipline check
+    trades = db.get_trade_history(date=today)
+    settings = load_settings()
+    alerts = []
+    rules = settings.get("rules", {})
+    max_daily_loss = rules.get("max_daily_loss", -999)
+    daily_pnl = sum(t.get("profit", 0) for t in trades)
+    if daily_pnl < max_daily_loss:
+        alerts.append({
+            "rule": "max_daily_loss", "severity": "critical",
+            "message": f"Daily loss ${daily_pnl:.2f} exceeds limit ${max_daily_loss:.2f}",
+            "timestamp": datetime.now(get_local_tz()).isoformat(),
+        })
+    wins = sum(1 for t in trades if t.get("profit", 0) > 0)
+    total = len(trades)
+    score = max(0, 100 - len(alerts) * 15)
+    report = {"score": score, "alerts": alerts, "total_violations": len(alerts)}
+    if alerts:
+        db.save_alerts(alerts, today)
+    db.save_daily_snapshot(today, {"net_pnl": daily_pnl, "total_trades": total, "wins": wins}, score, len(alerts))
     return report
 
 
@@ -443,6 +1077,112 @@ def run_discipline_check():
 def get_alerts(date: str = None, limit: int = 50):
     """Get stored alerts."""
     return db.get_alerts(date=date, limit=limit)
+
+
+# ------------------------------------------------------------------ #
+#  Trading operations (READ+WRITE) — place/close/modify orders
+# ------------------------------------------------------------------ #
+
+class PlaceOrderRequest(BaseModel):
+    account_id: int          # local DB id
+    symbol: str
+    order_type: str          # "ORDER_TYPE_BUY" or "ORDER_TYPE_SELL"
+    volume: float
+    stop_loss: float = 0
+    take_profit: float = 0
+    comment: str = "AIPoweredJournal"
+
+class ClosePositionRequest(BaseModel):
+    account_id: int
+    position_id: str
+    volume: float = None     # None = full close
+
+class ModifyPositionRequest(BaseModel):
+    account_id: int
+    position_id: str
+    stop_loss: float = None
+    take_profit: float = None
+
+
+def _get_account_by_db_id(account_id: int) -> dict:
+    accs = db.get_mt5_accounts()
+    acc = next((a for a in accs if a["id"] == account_id), None)
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if not acc.get("metaapi_account_id"):
+        raise HTTPException(400, "Account not provisioned on MetaAPI yet")
+    return acc
+
+
+@app.post("/api/trade/place")
+async def api_place_order(req: PlaceOrderRequest):
+    """Place a market order (requires read+write password)."""
+    acc = _get_account_by_db_id(req.account_id)
+    try:
+        result = await ma.place_order(
+            metaapi_account_id=acc["metaapi_account_id"],
+            symbol=req.symbol,
+            order_type=req.order_type,
+            volume=req.volume,
+            stop_loss=req.stop_loss,
+            take_profit=req.take_profit,
+            comment=req.comment,
+        )
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/trade/close")
+async def api_close_position(req: ClosePositionRequest):
+    """Close a position (fully or partially)."""
+    acc = _get_account_by_db_id(req.account_id)
+    try:
+        result = await ma.close_position(acc["metaapi_account_id"], req.position_id, req.volume)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/trade/modify")
+async def api_modify_position(req: ModifyPositionRequest):
+    """Modify SL/TP of an open position."""
+    acc = _get_account_by_db_id(req.account_id)
+    try:
+        result = await ma.modify_position(
+            acc["metaapi_account_id"], req.position_id, req.stop_loss, req.take_profit
+        )
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/trade/close-all")
+async def api_close_all(account_id: int, symbol: str = None):
+    """Close all positions, optionally filtered by symbol."""
+    acc = _get_account_by_db_id(account_id)
+    results = await ma.close_all_positions(acc["metaapi_account_id"], symbol)
+    return {"status": "ok", "results": results}
+
+
+@app.get("/api/trade/price/{account_id}/{symbol}")
+async def api_symbol_price(account_id: int, symbol: str):
+    """Get live bid/ask price for a symbol."""
+    acc = _get_account_by_db_id(account_id)
+    return await ma.get_symbol_price(acc["metaapi_account_id"], symbol)
+
+
+# ------------------------------------------------------------------ #
+#  WebTerminal — embeddable MetaAPI web terminal URL
+# ------------------------------------------------------------------ #
+
+@app.get("/api/webterminal/{account_id}")
+def get_webterminal(account_id: int):
+    """Return the embeddable MetaAPI WebTerminal URL for an account."""
+    acc = _get_account_by_db_id(account_id)
+    url = ma.get_webterminal_url(acc["metaapi_account_id"])
+    return {"url": url, "account_id": account_id, "login": acc["login"]}
+
 
 
 # ------------------------------------------------------------------ #
@@ -457,24 +1197,108 @@ def get_journal_trades(date: str = None, symbol: str = None,
 
 @app.get("/api/journal/stats")
 def get_journal_stats():
-    """Get overall journal statistics."""
-    return db.get_journal_stats()
+    """Get overall journal statistics (cached 30 s)."""
+    cached = _cache_get("journal_stats")
+    if cached is not None:
+        return cached
+    result = db.get_journal_stats()
+    _cache_set("journal_stats", result, ttl=30.0)
+    return result
 
 
 @app.get("/api/journal/analytics")
 def get_journal_analytics():
-    """Get advanced GFT-style analytics for the Account Analysis page."""
-    return db.get_advanced_analytics()
+    """Get advanced GFT-style analytics for the Account Analysis page (cached 30 s)."""
+    cached = _cache_get("analytics")
+    if cached is not None:
+        return cached
+    result = db.get_advanced_analytics()
+    _cache_set("analytics", result, ttl=30.0)
+    return result
 
 
 @app.post("/api/journal/sync")
-def manual_trade_sync():
-    """Manually trigger trade sync to log all recent closed deals."""
-    if not mt5.is_connected:
-        raise HTTPException(503, "MT5 not connected")
-    sync_closed_trades(days_back=3650)
-    count = len(db.get_trade_history(date=datetime.now(IST).strftime("%Y-%m-%d")))
-    return {"status": "synced", "trades_today": count}
+async def manual_trade_sync(background_tasks: BackgroundTasks):
+    """Manually trigger full trade history sync (local MT5 or MetaAPI)."""
+    # Invalidate caches so the next fetch reflects the fresh data
+    _cache_invalidate("journal_stats")
+    _cache_invalidate("analytics")
+    if MT5_MODE == "local" and _mt5_local:
+        if not _mt5_local.is_connected:
+            raise HTTPException(503, "MT5 terminal not connected. Start MetaTrader 5 and try again.")
+
+        def _sync_local():
+            # Sync last 90 days of history from local MT5
+            now = datetime.now(get_local_tz())
+            start = now - timedelta(days=90)
+            deals = _mt5_local.get_deals(start, now)
+            # Group by position_id
+            pos_map = {}
+            for d in deals:
+                pid = d.get("position_id", d.get("ticket", 0))
+                if pid not in pos_map:
+                    pos_map[pid] = {"in": None, "outs": []}
+                if d.get("entry") == 0:
+                    pos_map[pid]["in"] = d
+                elif d.get("entry") == 1:
+                    pos_map[pid]["outs"].append(d)
+            synced = 0
+            for pid, pdata in pos_map.items():
+                if not pdata["outs"]:
+                    continue
+                outs = sorted(pdata["outs"], key=lambda x: x.get("time", ""))
+                last_out = outs[-1]
+                agg = last_out.copy()
+                # Include IN deal's commission/swap (brokers split commission across entry+exit deals)
+                in_comm = pdata["in"].get("commission", 0) if pdata["in"] else 0
+                in_swap = pdata["in"].get("swap", 0) if pdata["in"] else 0
+                agg["profit"] = round(sum(o.get("profit", 0) for o in outs), 2)
+                agg["commission"] = round(sum(o.get("commission", 0) for o in outs) + in_comm, 2)
+                agg["swap"] = round(sum(o.get("swap", 0) for o in outs) + in_swap, 2)
+                agg["volume"] = round(sum(o.get("volume", 0) for o in outs), 2)
+                agg["position_id"] = pid
+                agg["close_time"] = last_out.get("time", "")
+                agg["close_price"] = last_out.get("price", 0)
+                agg["date"] = agg["close_time"][:10] if agg["close_time"] else now.strftime("%Y-%m-%d")
+                if pdata["in"]:
+                    agg["open_price"] = pdata["in"].get("price", 0)
+                    agg["open_time"] = pdata["in"].get("time", "")
+                    agg["type"] = pdata["in"].get("type", agg.get("type", ""))
+                    try:
+                        in_t = datetime.fromisoformat(pdata["in"]["time"])
+                        out_t = datetime.fromisoformat(last_out["time"])
+                        agg["duration_minutes"] = (out_t - in_t).total_seconds() / 60.0
+                    except Exception:
+                        agg["duration_minutes"] = 0.0
+                r = db.upsert_trade_by_position(pid, agg)
+                if r in ("inserted", "updated"):
+                    synced += 1
+            logger.info(f"Local MT5 sync: {synced} trades processed")
+
+        background_tasks.add_task(_sync_local)
+        count = len(db.get_trade_history(date=datetime.now(get_local_tz()).strftime("%Y-%m-%d")))
+        return {"status": "syncing", "trades_today": count}
+
+    # Cloud mode
+    accounts = db.get_mt5_accounts()
+    if not accounts or not METAAPI_TOKEN:
+        raise HTTPException(503, "No MT5 accounts configured. Add an account in MT5 Accounts page.")
+
+    async def _sync_all():
+        total = 0
+        for acc in accounts:
+            if not acc.get("metaapi_account_id"):
+                continue
+            closed = await ma.sync_all_history(acc["metaapi_account_id"], days_back=3650)
+            for deal in closed:
+                r = db.upsert_trade_by_position(deal.get("position_id", 0), deal)
+                if r in ("inserted", "updated"):
+                    total += 1
+        logger.info(f"Manual full sync: {total} trades processed")
+
+    background_tasks.add_task(_sync_all)
+    count = len(db.get_trade_history(date=datetime.now(get_local_tz()).strftime("%Y-%m-%d")))
+    return {"status": "syncing", "trades_today": count}
 
 
 # ------------------------------------------------------------------ #
@@ -514,22 +1338,45 @@ async def run_ai_analysis(background_tasks: BackgroundTasks, req: AIAnalysisRequ
     if req is None:
         req = AIAnalysisRequest()
 
-    today = req.date or datetime.now(IST).strftime("%Y-%m-%d")
-    
-    # Sync trades first to ensure DB is up to date
-    if mt5.is_connected:
-        sync_closed_trades(days_back=1)
-    
-    daily_stats = mt5.get_daily_stats() if mt5.is_connected else {}
-    positions = mt5.get_open_positions() if mt5.is_connected else []
-    report = checker.run_all_checks()
+    today = req.date or datetime.now(get_local_tz()).strftime("%Y-%m-%d")
+
+    # Gather live data based on mode
+    daily_stats = {}
+    positions = []
+    if MT5_MODE == "local" and _mt5_local and _mt5_local.is_connected:
+        try:
+            daily_stats = _mt5_local.get_daily_stats()
+            positions = _mt5_local.get_open_positions()
+        except Exception as e:
+            logger.warning(f"AI analysis: failed to fetch local MT5 data: {e}")
+    else:
+        accounts = db.get_mt5_accounts()
+        if accounts and METAAPI_TOKEN:
+            try:
+                primary = accounts[0]
+                if primary.get("metaapi_account_id"):
+                    daily_stats = await ma.get_daily_stats(primary["metaapi_account_id"])
+                    for acc in accounts:
+                        if acc.get("metaapi_account_id"):
+                            positions.extend(await ma.get_open_positions(acc["metaapi_account_id"]))
+            except Exception as e:
+                logger.warning(f"AI analysis: failed to fetch live data: {e}")
+
     rules = load_settings()
     journal_stats = db.get_journal_stats()
     chart_snapshots = db.get_chart_snapshots_for_rag(limit=10)
-    
+
     # Get today's trades from persistent DB (more reliable than MT5 deal window)
     today_trades_from_db = db.get_trade_history(date=today, limit=200)
-    
+
+    # Build a discipline report from DB data
+    alerts = db.get_alerts(date=today)
+    report = {
+        "score": max(0, 100 - len(alerts) * 15),
+        "alerts": alerts,
+        "total_violations": len(alerts),
+    }
+
     # Cross-reference: use DB trade count if it's higher (catches cross-day trades)
     db_trade_count = len(today_trades_from_db)
     mt5_closed = daily_stats.get("closed_trades", 0)
@@ -609,7 +1456,7 @@ async def upload_chart(background_tasks: BackgroundTasks, body: dict = {}):
             return {"status": "duplicate", "id": snap["id"], "message": "This chart was already captured"}
 
     # Save to disk
-    now = datetime.now(IST)
+    now = datetime.now(get_local_tz())
     filename = f"chart_{now.strftime('%Y%m%d_%H%M%S')}_{image_hash}.png"
     filepath = CHART_SCREENSHOTS_DIR / filename
     filepath.write_bytes(image_bytes)
@@ -753,6 +1600,62 @@ def update_settings(rules: RulesConfig):
     settings = rules.model_dump()
     save_settings(settings)
     return {"status": "saved", "settings": settings}
+
+
+# ------------------------------------------------------------------ #
+#  MT5 Access Controller (prop-firm safe gatekeeper)
+# ------------------------------------------------------------------ #
+
+async def _mt5_access_loop():
+    """Background loop: evaluate MT5 access every 30 seconds."""
+    await asyncio.sleep(5)  # initial delay for server startup
+    while True:
+        try:
+            _mt5_access.tick()
+        except Exception as e:
+            logger.warning(f"MT5 Access Controller error: {e}")
+        await asyncio.sleep(30)
+
+
+@app.get("/api/mt5-access/status")
+def mt5_access_status():
+    """Get current MT5 access controller state."""
+    return _mt5_access.get_status()
+
+
+@app.post("/api/mt5-access/override")
+def mt5_access_override(body: dict):
+    """Set manual override: {action: 'open' | 'close' | 'clear'}."""
+    action = body.get("action", "clear")
+    _mt5_access.set_override(action)
+    # Immediately apply
+    _mt5_access.tick()
+    return {"status": "ok", "action": action, "state": _mt5_access.get_status()}
+
+
+@app.post("/api/mt5-access/force-open")
+def mt5_access_force_open():
+    """Emergency override: open MT5, but only during Asian session."""
+    allowed = _mt5_access.force_open()
+    if not allowed:
+        raise HTTPException(403, "Force Open is only allowed during the Asian session (05:30–12:00 IST)")
+    _mt5_access.tick()
+    return {"status": "ok", "action": "force_open", "state": _mt5_access.get_status()}
+
+
+@app.post("/api/mt5-access/reset")
+def mt5_access_reset():
+    """Reset daily state (for testing)."""
+    _mt5_access.reset_day()
+    return {"status": "reset", "state": _mt5_access.get_status()}
+
+
+@app.post("/api/mt5-access/toggle")
+def mt5_access_toggle(body: dict):
+    """Enable or disable the access controller: {enabled: true/false}."""
+    enabled = body.get("enabled", True)
+    _mt5_access.set_enabled(enabled)
+    return {"status": "ok", "controller_enabled": enabled}
 
 
 # ------------------------------------------------------------------ #
