@@ -2,7 +2,10 @@
 MetaTrader 5 integration service.
 Handles connection management, data fetching, and trade history.
 """
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None  # Not available on Linux; local mode won't work
 from datetime import datetime, timedelta, timezone
 
 from config import get_local_tz
@@ -26,12 +29,37 @@ class MT5Service:
     #  Connection management
     # ------------------------------------------------------------------ #
     def connect(self) -> bool:
-        """Initialize the MT5 terminal connection."""
+        """Initialize the MT5 terminal connection.
+
+        Always calls mt5.shutdown() first to release any stale IPC lock
+        from a previous Python process that may have been killed uncleanly.
+        Runs mt5.initialize() in a thread with a timeout to prevent blocking
+        the server startup if the terminal is unresponsive.
+        """
         try:
+            # Release any stale connection from a previous process
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+
             kwargs = {}
             if self._mt5_path:
                 kwargs["path"] = self._mt5_path
-            if not mt5.initialize(**kwargs):
+
+            # Run initialize in a thread with a timeout — mt5.initialize()
+            # can hang indefinitely if the terminal's IPC pipe is locked
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(mt5.initialize, **kwargs)
+                try:
+                    result = future.result(timeout=30)  # 30s timeout
+                except concurrent.futures.TimeoutError:
+                    logger.error("MT5 init timed out after 30s — terminal may be unresponsive")
+                    self._connected = False
+                    return False
+
+            if not result:
                 err = mt5.last_error()
                 logger.error(f"MT5 init failed: {err}")
                 self._connected = False
@@ -58,7 +86,7 @@ class MT5Service:
         if not self._connected:
             return False
         now = time.time()
-        if now - self._last_conn_check < 1.0:
+        if now - self._last_conn_check < 5.0:
             return self._last_conn_result
         try:
             info = mt5.terminal_info()
@@ -387,6 +415,11 @@ class MT5Service:
                 loss_durations.append(d["duration_minutes"])
                 last_loss_time = close_t
             
+            # Get open time if available
+            open_time_str = ""
+            if in_deal and in_deal.get("time"):
+                open_time_str = in_deal["time"]
+
             # Build chronological sequence payload for AI
             trade_sequence.append({
                 "ticket": d["ticket"],
@@ -395,6 +428,7 @@ class MT5Service:
                 "volume": d["volume"],
                 "profit": profit,
                 "duration_minutes": round(d["duration_minutes"], 1),
+                "open_time": open_time_str,
                 "close_time": d["time"]
             })
 
