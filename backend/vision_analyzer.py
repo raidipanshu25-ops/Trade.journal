@@ -1,14 +1,23 @@
 """
-Vision AI service — Two-pass pipeline:
-  Pass 1: Llama 3.2 90B Vision reads the chart image → raw SMC narrative (NVIDIA NIM)
-  Pass 2: Z.ai text model (GLM 5.2) takes that narrative → structured entry coaching JSON
+Vision AI service — Multi-provider pipeline:
+  - Pass 1 (Vision read): NVIDIA NIM llama-3.2-11b-vision-instruct
+                       OR Google Gemini Flash Vision
+                       OR OpenAI GPT-4o Vision
+                       OR OpenRouter Vision model
+  - Pass 2 (Coaching):  Same multi-provider text routing as AIAnalyzer
+
+Vision is available when ANY single vision provider is configured.
 """
 import logging
 import asyncio
 import json
 import re
 from openai import OpenAI
-from config import NVIDIA_API_KEY, ZAI_API_KEY
+from config import (
+    NVIDIA_API_KEY, ZAI_API_KEY,
+    GEMINI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY,
+    VISION_PROVIDER, VISION_MODEL, AI_PROVIDER, AI_MODEL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +102,7 @@ Now produce ONLY a valid JSON object (no markdown, no code fences, no explanatio
       "Wait for bullish/bearish engulfing at the POI",
       "Wait for market to cross [key level] with conviction"
     ],
-    "perfect_entry_description": "Describe the PERFECT A+ entry for this exact chart. Be ultra-specific: which exact price level for entry, what confirmation candle, what has to happen first. Think: Liquidity Sweep → Displacement → FVG → Entry on retest.",
+    "perfect_entry_description": "Describe the PERFECT A+ entry for this exact chart. Be ultra-specific: which exact price level for entry, what confirmation candle, what has to happen first. Think: Liquidity Sweep -> Displacement -> FVG -> Entry on retest.",
     "stop_loss_placement": "Where should SL be placed using SMC logic? Below the OB? Below the liquidity sweep wick? Be specific with price level.",
     "take_profit_targets": [
       "TP1: [specific level] — nearest liquidity pool or opposing OB",
@@ -130,75 +139,132 @@ CRITICAL RULES:
 - Reference EXACT price levels from the vision analysis (e.g., "Wait for sweep below 1.3420" not "wait for sweep below support")
 - The "what_to_wait_for" must be a step-by-step SEQUENCE, not random tips
 - If the setup is B or lower, your coaching must explain EXACTLY how to upgrade it to an A+
-- Think in terms of: Liquidity Sweep → Displacement → FVG → Entry → SL below inducement → TP at opposing liquidity
+- Think in terms of: Liquidity Sweep -> Displacement -> FVG -> Entry -> SL below inducement -> TP at opposing liquidity
 - EVERY field must be filled. Do not return empty arrays or empty strings."""
+
+# --- Vision provider registry ---
+# (key, provider_name, base_url, default_vision_model)
+_VISION_PROVIDERS = [
+    (NVIDIA_API_KEY,     "nvidia",      "https://integrate.api.nvidia.com/v1",                         "meta/llama-3.2-11b-vision-instruct"),
+    (GEMINI_API_KEY,     "gemini",      "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
+    (OPENAI_API_KEY,     "openai",      "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
+    (OPENROUTER_API_KEY, "openrouter",  "https://openrouter.ai/api/v1/",                               "google/gemini-flash-1.5"),
+]
+
+# Text provider registry for coaching pass (same as AIAnalyzer)
+_TEXT_PROVIDERS = [
+    (GEMINI_API_KEY,     "gemini",      "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
+    (OPENAI_API_KEY,     "openai",      "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
+    (OPENROUTER_API_KEY, "openrouter",  "https://openrouter.ai/api/v1/",                               "openai/gpt-4o-mini"),
+    (GROQ_API_KEY,       "groq",        "https://api.groq.com/openai/v1/",                             "llama-3.1-8b-instant"),
+    (ZAI_API_KEY,        "zai",         "https://api.z.ai/api/paas/v4/",                               "glm-4-flash"),
+]
 
 
 class VisionAnalyzer:
-    """Two-pass chart analysis: Vision reads (NVIDIA) → Z.ai coaches."""
+    """Multi-provider chart vision analysis: vision read -> structured coaching."""
 
-    VISION_MODEL = "meta/llama-3.2-90b-vision-instruct"
-    COACHING_MODEL = "glm-5.2"
-    VISION_BASE_URL = "https://integrate.api.nvidia.com/v1"
-    COACHING_BASE_URL = "https://api.z.ai/api/paas/v4/"
-
-    def __init__(self, api_key: str = ""):
-        self._nvidia_key = api_key or NVIDIA_API_KEY
-        self._zai_key = ZAI_API_KEY
+    def __init__(self):
         self._vision_client = None
+        self._vision_provider = "none"
+        self._vision_model = ""
         self._coaching_client = None
+        self._coaching_provider = "none"
+        self._coaching_model = ""
+        self._init_clients()
 
-        # Vision client (NVIDIA NIM for Llama Vision)
-        if self._nvidia_key and self._nvidia_key.startswith("nvapi-"):
-            try:
-                self._vision_client = OpenAI(
-                    api_key=self._nvidia_key,
-                    base_url=self.VISION_BASE_URL,
-                )
-            except Exception as e:
-                logger.error(f"Failed to initialize Vision AI client: {e}")
+    def _init_clients(self):
+        """Initialise vision and coaching clients from available provider keys."""
+        forced_vision = VISION_PROVIDER
+        forced_text   = AI_PROVIDER
 
-        # Coaching client (Z.ai for structured analysis)
-        if self._zai_key:
+        # ── Vision client ──
+        for key_val, name, base_url, default_model in _VISION_PROVIDERS:
+            if forced_vision and name != forced_vision:
+                continue
+            if not key_val:
+                continue
+            # NVIDIA key must start with nvapi-
+            if name == "nvidia" and not key_val.startswith("nvapi-"):
+                continue
             try:
-                self._coaching_client = OpenAI(
-                    api_key=self._zai_key,
-                    base_url=self.COACHING_BASE_URL,
-                )
+                self._vision_client = OpenAI(api_key=key_val, base_url=base_url)
+                self._vision_provider = name
+                self._vision_model = VISION_MODEL or default_model
+                logger.info(f"VisionAnalyzer vision client: provider={name}, model={self._vision_model}")
+                break
             except Exception as e:
-                logger.error(f"Failed to initialize Z.ai coaching client: {e}")
+                logger.warning(f"VisionAnalyzer: failed to init vision {name}: {e}")
+
+        # ── Coaching (text) client ──
+        for key_val, name, base_url, default_model in _TEXT_PROVIDERS:
+            if forced_text and name != forced_text:
+                continue
+            if not key_val:
+                continue
+            try:
+                self._coaching_client = OpenAI(api_key=key_val, base_url=base_url)
+                self._coaching_provider = name
+                self._coaching_model = AI_MODEL or default_model
+                logger.info(f"VisionAnalyzer coaching client: provider={name}, model={self._coaching_model}")
+                break
+            except Exception as e:
+                logger.warning(f"VisionAnalyzer: failed to init coaching {name}: {e}")
+
+        if not self._vision_client:
+            logger.warning("VisionAnalyzer: no vision provider available. Add NVIDIA_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY.")
+        if not self._coaching_client:
+            logger.warning("VisionAnalyzer: no coaching provider available.")
 
     @property
     def is_available(self) -> bool:
-        return self._vision_client is not None and self._coaching_client is not None
+        """True when at least the vision client is ready."""
+        return self._vision_client is not None
+
+    @property
+    def vision_provider(self) -> str:
+        return self._vision_provider
+
+    @property
+    def coaching_provider(self) -> str:
+        return self._coaching_provider
 
     async def analyze_chart(self, image_base64: str, context: str = "",
                             symbol: str = "", timeframe: str = "") -> dict:
         """
         Two-pass analysis:
-          1. Vision model reads the chart → raw narrative
+          1. Vision model reads the chart -> raw narrative
           2. Text model generates structured entry coaching JSON
+        Falls back to vision-only result if coaching unavailable.
         """
         if not self.is_available:
-            return self._fallback_result("Vision AI not available — check NVIDIA API key")
+            return self._fallback_result(
+                f"Vision AI not available. Configure NVIDIA_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY in backend/.env."
+            )
 
         try:
-            # ─── PASS 1: Vision reads the chart ──────────────
-            logger.info("Vision Pass 1: Reading chart with Llama 3.2 90B Vision...")
+            # ─── PASS 1: Vision reads the chart ───────────────────────
+            logger.info(f"Vision Pass 1 [{self._vision_provider}/{self._vision_model}]: reading chart...")
             vision_text = await self._pass1_vision_read(image_base64, symbol, timeframe, context)
-            
+
             if not vision_text or vision_text.startswith("Error"):
                 return self._fallback_result(f"Vision read failed: {vision_text}")
 
-            logger.info(f"Vision Pass 1 complete: {len(vision_text)} chars of analysis")
+            logger.info(f"Vision Pass 1 complete: {len(vision_text)} chars")
 
-            # ─── PASS 2: Coaching model generates structured JSON ──
-            logger.info("Vision Pass 2: Generating entry coaching with Z.ai...")
-            analysis = await self._pass2_coaching(vision_text, symbol, timeframe, context)
-            
+            # ─── PASS 2: Coaching model generates structured JSON ───────
+            if self._coaching_client:
+                logger.info(f"Vision Pass 2 [{self._coaching_provider}/{self._coaching_model}]: generating coaching...")
+                analysis = await self._pass2_coaching(vision_text, symbol, timeframe, context)
+            else:
+                # No coaching provider: return raw vision text in a minimal structure
+                logger.warning("Vision Pass 2 skipped: no coaching client available.")
+                analysis = self._empty_result(vision_text)
+
             analysis["status"] = "done"
-            analysis["vision_raw"] = vision_text  # Keep raw reading for reference
+            analysis["vision_raw"] = vision_text
             analysis["full_analysis"] = vision_text  # Backward compat
+            analysis["_provider"] = f"{self._vision_provider}/{self._vision_model}"
             return analysis
 
         except Exception as e:
@@ -216,9 +282,10 @@ class VisionAnalyzer:
         if context:
             user_text += f" Trader's note: {context}"
 
+        # Build the multimodal message (OpenAI-compatible format)
         def _call():
             return self._vision_client.chat.completions.create(
-                model=self.VISION_MODEL,
+                model=self._vision_model,
                 messages=[
                     {"role": "system", "content": VISION_READ_PROMPT},
                     {
@@ -243,7 +310,7 @@ class VisionAnalyzer:
 
     async def _pass2_coaching(self, vision_analysis: str, symbol: str,
                                timeframe: str, context: str) -> dict:
-        """Pass 2: Feed vision output to Z.ai for structured coaching."""
+        """Pass 2: Feed vision output to text model for structured coaching."""
         prompt = COACHING_PROMPT.format(
             vision_analysis=vision_analysis,
             symbol=symbol or "Unknown",
@@ -253,7 +320,7 @@ class VisionAnalyzer:
 
         def _call():
             return self._coaching_client.chat.completions.create(
-                model=self.COACHING_MODEL,
+                model=self._coaching_model,
                 messages=[
                     {"role": "system", "content": "You are AXIOM, an elite SMC trading coach. Return ONLY valid JSON."},
                     {"role": "user", "content": prompt},
@@ -264,10 +331,10 @@ class VisionAnalyzer:
 
         response = await asyncio.to_thread(_call)
         raw_text = response.choices[0].message.content
-        
-        # Parse JSON from Kimi response
+
+        # Parse JSON from response
         analysis = self._parse_json_response(raw_text)
-        
+
         # If parsing failed, build a minimal result with the raw text
         if not analysis.get("entry_improvement"):
             logger.warning("Coaching model didn't return structured entry_improvement, injecting raw")
@@ -332,7 +399,7 @@ class VisionAnalyzer:
 
     @staticmethod
     def _fallback_result(error: str) -> dict:
-        result = VisionAnalyzer._empty_result.__func__("")
+        result = VisionAnalyzer._empty_result("")
         result["status"] = "error"
         result["full_analysis"] = f"Error: {error}"
         return result

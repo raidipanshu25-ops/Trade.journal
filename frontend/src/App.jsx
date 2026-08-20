@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useMemo, useCallback, lazy, Suspense, useRef } from 'react';
 import { useDashboard, useLiveData } from './hooks';
 import { Sidebar } from './components/Sidebar';
 import { StatCard } from './components/StatCard';
@@ -7,6 +7,9 @@ import { AlertFeed } from './components/AlertFeed';
 import { TradesTable } from './components/TradesTable';
 import { AIPanel } from './components/AIPanel';
 import { LoginPage } from './components/LoginPage';
+import { MorningRitual } from './components/MorningRitual';
+import { PreTradeGate } from './components/PreTradeGate';
+import { PostTradeReflection } from './components/PostTradeReflection';
 
 // applyThemePreset is a pure function (no JSX) — import it directly
 // so SettingsPage.jsx can remain fully lazy-loaded.
@@ -109,6 +112,57 @@ function App() {
     setCurrentUser(null);
   }, []);
 
+  // ── Morning Ritual gate ──────────────────────────────────────────
+  const [ritualRequired, setRitualRequired] = useState(false);
+  const [ritualSettings, setRitualSettings] = useState(null);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    api.getRitual().then(r => {
+      if (!r.completed) setRitualRequired(true);
+    }).catch(() => {});
+    api.getSettings().then(s => setRitualSettings(s)).catch(() => {});
+  }, [isAuthenticated]);
+
+  // ── Pre-Trade Gate ────────────────────────────────────────────────
+  const [preTradeGateOpen, setPreTradeGateOpen] = useState(false);
+  const preTradeCallbackRef = useRef(null);
+
+  // Expose a global hook for the MT5 access panel to trigger the gate
+  useEffect(() => {
+    window.__openPreTradeGate = (callback) => {
+      preTradeCallbackRef.current = callback;
+      setPreTradeGateOpen(true);
+    };
+    return () => { window.__openPreTradeGate = null; };
+  }, []);
+
+  // ── Post-Trade Reflection ────────────────────────────────────────
+  const [reflectionTrade, setReflectionTrade] = useState(null);
+  const prevClosedTicketsRef = useRef(new Set());
+
+  // Detect newly closed trades via position count drop + historyUpdatedCounter
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    // Check recent closed positions from history
+    api.todayDeals().then(deals => {
+      if (!Array.isArray(deals)) return;
+      // Find the most recent closed deal that hasn't been reflected on
+      const reflected = JSON.parse(localStorage.getItem('tj-reflected-tickets') || '[]');
+      const pending = deals.find(d => d.entry === 1 && !reflected.includes(String(d.ticket)));
+      if (pending) {
+        setReflectionTrade(pending);
+      }
+    }).catch(() => {});
+  }, [live.historyUpdatedCounter, isAuthenticated]);
+
+  const handleReflectionDone = useCallback((ticket) => {
+    const reflected = JSON.parse(localStorage.getItem('tj-reflected-tickets') || '[]');
+    reflected.push(String(ticket));
+    localStorage.setItem('tj-reflected-tickets', JSON.stringify(reflected.slice(-100)));
+    setReflectionTrade(null);
+  }, []);
+
   // ── Derived data (memoised — recalculates only when source changes) ─
   const positions     = live.positions;
   const account       = live.account;
@@ -151,6 +205,10 @@ function App() {
     return <LoginPage onLogin={() => setIsAuthenticated(true)} />;
   }
 
+  if (ritualRequired) {
+    return <MorningRitual settings={ritualSettings} onComplete={() => setRitualRequired(false)} />;
+  }
+
   return (
     <div className="app-layout">
       <Sidebar
@@ -166,6 +224,35 @@ function App() {
       />
 
       <main className="main-content">
+        {/* ===== Pre-Trade Gate Modal ===== */}
+        {preTradeGateOpen && (
+          <PreTradeGate
+            onSubmit={(entry, moodFlagged) => {
+              setPreTradeGateOpen(false);
+              if (preTradeCallbackRef.current) {
+                preTradeCallbackRef.current(true, moodFlagged);
+                preTradeCallbackRef.current = null;
+              }
+            }}
+            onCancel={() => {
+              setPreTradeGateOpen(false);
+              if (preTradeCallbackRef.current) {
+                preTradeCallbackRef.current(false, false);
+                preTradeCallbackRef.current = null;
+              }
+            }}
+          />
+        )}
+
+        {/* ===== Post-Trade Reflection Modal ===== */}
+        {reflectionTrade && (
+          <PostTradeReflection
+            trade={reflectionTrade}
+            onSubmit={() => handleReflectionDone(reflectionTrade?.ticket)}
+            onSkip={() => handleReflectionDone(reflectionTrade?.ticket)}
+          />
+        )}
+
         {/* ===== Violations Popup Modal ===== */}
         {page === 'dashboard' && violationsPopup.length > 0 && !popupDismissed && (
           <div className="violation-overlay" onClick={() => setPopupDismissed(true)}>

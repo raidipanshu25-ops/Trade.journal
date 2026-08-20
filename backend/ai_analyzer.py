@@ -1,11 +1,18 @@
 """
-AI Analysis service using Z.ai (GLM 5.2).
-Provides professional trading analysis and coaching feedback.
+AI Analysis service — multi-provider routing.
+Supports: Google Gemini, OpenAI, OpenRouter, Groq, Zhipu/Z.ai
+Auto-detects the first available provider based on env keys.
 """
+import json
 import logging
 import asyncio
 from openai import OpenAI
-from config import ZAI_API_KEY
+from config import (
+    AI_PROVIDER, AI_MODEL,
+    ZAI_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY,
+    OPENROUTER_API_KEY, GROQ_API_KEY, HF_API_KEY,
+    NVIDIA_NIM_API_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,25 +191,111 @@ After the grade, close with a short personal sign-off — 2–3 sentences, no he
 - You MUST use historical data (daily vs weekly vs overall) to identify trends. A single day tells you a story. A week tells you a pattern. The overall record tells you the truth.
 """
 
+# ─── Condensed system prompt for smaller models (8B) ─────────────────
+# The full SYSTEM_PROMPT exceeds the context window of 8B models on
+# NVIDIA NIM.  This version preserves AXIOM's personality and all
+# analysis sections but strips verbose examples.
+SYSTEM_PROMPT_CONDENSED = """You are AXIOM — this trader's brutally honest mentor. You speak as "I" and address the trader as "you." Every statement traces back to data. Harsh where the data demands it, warm where earned.
+
+You ground your analysis in Mark Douglas (thinking in probabilities), Brett Steenbarger (cognitive distortions), Van Tharp (R-multiples, expectancy), and behavioral finance (disposition effect, loss aversion, overconfidence, gambler's fallacy, recency bias).
+
+Fractional Entry Protocol: The trader deploys 40-60% of full quantity initially. Full quantity: XAUUSD 0.05-0.06 lots, Forex 0.40-0.50 lots. Call out violations.
+
+Open with a 2-3 sentence personal greeting acknowledging the session honestly.
+
+Your review MUST cover these sections in order:
+
+## 📊 Performance Snapshot
+Total trades, net P&L, win rate, largest win vs loss, profit factor. Compare daily vs weekly vs overall metrics.
+
+## 📐 Session Performance Audit
+For each session (Asia/London/New York): trades taken vs limit, whether breached, net P&L.
+
+## 🧠 Psychological Autopsy
+Diagnose: patience (win vs loss hold times), revenge trading (<5 min after loss), tilt (lot size after loss), overtrading, fear of winning, session decay. Reference exact trades.
+
+## ⏱️ Trade Sequence Forensics
+Walk the sequence chronologically. Name worst and best decision. Identify Golden Window and Danger Zone.
+
+## 🔁 Trade Frequency DNA
+Average gap, gap trend, burst windows (3+ trades in 15 min), velocity (trades/hour), breaks taken.
+
+## 📍 Sequential Trade Profiling
+Break down by position (#1 Anchor, #2 Reaction, #3+ Spiral Zone) with table: Position | Count | Win Rate | Avg P&L | Avg Lot.
+
+## ✅ Rule Compliance Audit
+Table: Rule | Limit | Actual | Verdict (✅/❌) for max trades/day, per session, lot size, daily loss.
+
+## 🔬 Edge Diagnosis
+Expectancy per trade (daily/weekly/overall), profit factor, mathematical viability verdict.
+
+## 💡 Tomorrow's Directives
+Exactly 3 specific, measurable rules based on today's failures.
+
+## 🏆 Discipline Grade
+A+ to F. Revenge trading = automatic F. One sentence, no softening.
+
+Close with 2-3 sentence personal sign-off referencing something specific.
+
+Laws: Every statement backed by data. Emojis only in headers. If same leak repeats, call it a pattern."""
+
+
+# ─── Provider registry ───────────────────────────────────────────────
+# Each entry: (key_value, provider_name, base_url, default_model)
+# Providers are tried in order; first one with a non-empty key wins.
+_PROVIDERS = [
+    # (env_key,               name,             base_url,                                                  default_model)
+    (NVIDIA_NIM_API_KEY, "nvidia-nim",       "https://nim.api.nvidia.com/v1/",                              "DavidAU/Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-Claude-4.5-Opus-High-Reasoning"),
+    (GEMINI_API_KEY,     "gemini",           "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
+    (OPENAI_API_KEY,     "openai",           "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
+    (OPENROUTER_API_KEY, "openrouter",       "https://openrouter.ai/api/v1/",                               "openai/gpt-4o-mini"),
+    (HF_API_KEY,         "huggingface",      "https://router.huggingface.co/v1/",                           "DavidAU/Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-Claude-4.5-Opus-High-Reasoning:featherless-ai"),
+    (GROQ_API_KEY,       "groq",             "https://api.groq.com/openai/v1/",                             "llama-3.1-8b-instant"),
+    (ZAI_API_KEY,        "zai",              "https://api.z.ai/api/paas/v4/",                               "glm-4-flash"),
+]
+
 
 class AIAnalyzer:
-    """Wraps the Z.ai API (GLM 5.2) for trade analysis."""
+    """Multi-provider AI trading coach. Auto-detects available provider."""
 
-    def __init__(self, api_key: str = ""):
-        self._api_key = api_key or ZAI_API_KEY
+    def __init__(self):
         self._client = None
-        if self._api_key:
+        self._provider_name = "none"
+        self._model = ""
+        self._last_error = ""
+        self._init_client()
+
+    def _init_client(self):
+        """Pick the first provider whose key is available (or the one set via AI_PROVIDER)."""
+        # If user explicitly set AI_PROVIDER, honour it
+        forced = AI_PROVIDER  # e.g. "gemini", "openai", etc.
+        for key_val, name, base_url, default_model in _PROVIDERS:
+            if forced and name != forced:
+                continue
+            if not key_val:
+                continue
             try:
-                self._client = OpenAI(
-                    api_key=self._api_key,
-                    base_url="https://api.z.ai/api/paas/v4/",
-                )
+                self._client = OpenAI(api_key=key_val, base_url=base_url)
+                self._provider_name = name
+                self._model = AI_MODEL or default_model
+                logger.info(f"AIAnalyzer initialised: provider={name}, model={self._model}")
+                return
             except Exception as e:
-                logger.error(f"Failed to initialize Z.ai client: {e}")
+                logger.warning(f"AIAnalyzer: failed to init {name}: {e}")
+
+        logger.warning("AIAnalyzer: no API key found for any provider — running in fallback mode.")
 
     @property
     def is_available(self) -> bool:
         return self._client is not None
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider_name
+
+    @property
+    def model_name(self) -> str:
+        return self._model
 
     async def analyze_trades(
         self,
@@ -217,11 +310,10 @@ class AIAnalyzer:
         today_trades_from_db: list[dict] = None,
         advanced_analytics: dict = None,
     ) -> str:
-        """Send trading data to Z.ai and return the analysis."""
+        """Send trading data to AI provider and return analysis."""
         if not self.is_available:
             return self._fallback_analysis(daily_stats, alerts)
 
-        # Build the user message with all context
         user_content = self._build_prompt(
             daily_stats, open_positions, alerts, rules, custom_prompt,
             journal_stats=journal_stats,
@@ -231,23 +323,45 @@ class AIAnalyzer:
             advanced_analytics=advanced_analytics,
         )
 
+        # For smaller models (8B on NVIDIA NIM), use condensed prompt & lower max_tokens
+        is_small_model = self._provider_name in ("nvidia-nim", "groq") or "8b" in self._model.lower()
+        sys_prompt = SYSTEM_PROMPT_CONDENSED if is_small_model else SYSTEM_PROMPT
+        max_tok = 4096 if is_small_model else 8192
+
         try:
-            # Run synchronous OpenAI call in a thread to avoid blocking the event loop
             def _call_api():
                 return self._client.chat.completions.create(
-                    model="glm-5.2",
+                    model=self._model,
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": user_content},
                     ],
                     temperature=0.6,
-                    max_tokens=8192,
+                    max_tokens=max_tok,
                 )
 
             response = await asyncio.to_thread(_call_api)
             return response.choices[0].message.content
         except Exception as e:
-            logger.error(f"Z.ai API error: {e}")
+            self._last_error = str(e)
+            error_lower = str(e).lower()
+            # Surface actionable messages
+            if "429" in str(e) or "insufficient" in error_lower or "balance" in error_lower or "quota" in error_lower:
+                msg = (f"## \u26a0\ufe0f AI Analysis Unavailable\n\n"
+                       f"**Provider:** {self._provider_name} | **Model:** {self._model}\n\n"
+                       f"**Error:** API quota exceeded or insufficient balance.\n\n"
+                       f"**Fix:** Top up your `{self._provider_name.upper()}` account, or add a different provider key "
+                       f"(`GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`) in `backend/.env` and restart.")
+                logger.error(f"AI analysis quota error ({self._provider_name}): {e}")
+                return msg
+            elif "model" in error_lower or "1211" in str(e):
+                msg = (f"## \u26a0\ufe0f AI Analysis Unavailable\n\n"
+                       f"**Provider:** {self._provider_name} | **Model:** {self._model}\n\n"
+                       f"**Error:** Model not found.\n\n"
+                       f"**Fix:** Set `AI_MODEL=` to a valid model for `{self._provider_name}` in `backend/.env`.")
+                logger.error(f"AI analysis model error ({self._provider_name}): {e}")
+                return msg
+            logger.error(f"AI analysis error ({self._provider_name}): {e}")
             return self._fallback_analysis(daily_stats, alerts)
 
     # ------------------------------------------------------------------
@@ -648,8 +762,8 @@ class AIAnalyzer:
                     curr_t = seq[i]
                     if float(prev_t.get("profit", 0)) < 0 and float(curr_t.get("volume", 0)) > float(prev_t.get("volume", 0)):
                         escalations.append(
-                            f"Trade #{i} loss ({prev_t['profit']}) → Trade #{i+1} lot size increased "
-                            f"({prev_t['volume']} → {curr_t['volume']})"
+                            f"Trade #{i} loss ({prev_t['profit']}) -> Trade #{i+1} lot size increased "
+                            f"({prev_t['volume']} -> {curr_t['volume']})"
                         )
                 if escalations:
                     lines.append("## Lot-Size Escalation After Loss (Pre-Flagged)")
@@ -796,7 +910,7 @@ class AIAnalyzer:
                 trade_type = snap.get("trade_type")
                 if trade_profit is not None:
                     result = "WIN" if trade_profit > 0 else "LOSS"
-                    lines.append(f"   Trade Outcome: {trade_type} → {'+' if trade_profit > 0 else ''}{trade_profit:.2f} ({result})")
+                    lines.append(f"   Trade Outcome: {trade_type} -> {'+' if trade_profit > 0 else ''}{trade_profit:.2f} ({result})")
                 lines.append("")
 
             lines.append("Use this chart pattern history to identify recurring visual patterns in the trader's behaviour.")
@@ -833,11 +947,12 @@ class AIAnalyzer:
         lines.extend([
             "",
             "## 💡 Recommendations",
-            "- Connect your Z.ai API key for detailed AI-powered analysis.",
+            "- Add an AI provider key in `backend/.env` for detailed AI-powered analysis.",
+            "  Supported: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`",
             "- Review your rule configuration in Settings.",
             "",
             f"## 🏆 Score: {score}/100",
             "",
-            "*This is a basic analysis. Add your Z.ai API key in Settings for professional AI coaching.*"
+            "*This is a basic analysis. Add an AI provider API key and restart the backend for full AI coaching.*"
         ])
         return "\n".join(lines)

@@ -22,6 +22,7 @@ export function ChartVisionPage() {
   const [context, setContext] = useState('');
   const [streamActive, setStreamActive] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
+  const [aiStatus, setAiStatus] = useState(null);
   const streamRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -30,6 +31,8 @@ export function ChartVisionPage() {
   // Load snapshots on mount
   useEffect(() => {
     loadSnapshots();
+    // Fetch AI provider status
+    api.aiStatus().then(setAiStatus).catch(console.error);
     return () => {
       // Cleanup stream on unmount
       if (streamRef.current) {
@@ -234,6 +237,48 @@ export function ChartVisionPage() {
       <p className="page-subtitle">
         Capture charts from Exness WebTerminal • Vision AI analyzes patterns • Export training data
       </p>
+
+      {/* Vision provider info strip */}
+      {aiStatus && (
+        <div style={{
+          display: 'flex',
+          gap: 16,
+          alignItems: 'center',
+          fontSize: '0.75rem',
+          color: 'var(--text-2)',
+          background: 'var(--bg-2)',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          padding: '8px 16px',
+          marginBottom: 16,
+          flexWrap: 'wrap',
+        }}>
+          {aiStatus.vision?.available ? (
+            <>
+              <span style={{ color: 'var(--green)', fontWeight: 600 }}>● Vision AI Active</span>
+              <span><span style={{ color: 'var(--text-3)' }}>Vision: </span>
+                <code style={{ color: 'var(--cyan)', fontFamily: 'var(--mono)', fontSize: '0.7rem' }}>
+                  {aiStatus.vision.vision_provider}/{aiStatus.vision.vision_model}
+                </code>
+              </span>
+              {aiStatus.vision.coaching_provider && aiStatus.vision.coaching_provider !== 'none' && (
+                <span><span style={{ color: 'var(--text-3)' }}>Coaching: </span>
+                  <code style={{ color: 'var(--cyan)', fontFamily: 'var(--mono)', fontSize: '0.7rem' }}>
+                    {aiStatus.vision.coaching_provider}/{aiStatus.vision.coaching_model}
+                  </code>
+                </span>
+              )}
+            </>
+          ) : (
+            <>
+              <span style={{ color: 'var(--red)', fontWeight: 600 }}>● Vision AI Offline</span>
+              <span style={{ color: 'var(--yellow)' }}>
+                Add <code style={{ fontFamily: 'var(--mono)' }}>NVIDIA_API_KEY</code>, <code style={{ fontFamily: 'var(--mono)' }}>GEMINI_API_KEY</code>, or <code style={{ fontFamily: 'var(--mono)' }}>OPENAI_API_KEY</code> to <code style={{ fontFamily: 'var(--mono)' }}>backend/.env</code> and restart
+              </span>
+            </>
+          )}
+        </div>
+      )}
 
       {statusMsg && (
         <div className="cv-status-banner">{statusMsg}</div>

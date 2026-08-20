@@ -7,6 +7,7 @@ import os
 import time
 import threading
 from pathlib import Path
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 try:
@@ -26,9 +27,9 @@ DEFAULT_RULES = {
     "max_daily_loss_pct": 3.0,       # % of account balance
     "max_session_loss_pct": 2.0,
     "sessions": {
-        "asia":    {"start": "05:30", "end": "12:00", "enabled": True},
-        "london":  {"start": "13:00", "end": "16:30", "enabled": True},
-        "newyork": {"start": "19:00", "end": "22:00", "enabled": True},
+        "asia":    {"start": "05:30", "end": "12:00", "enabled": True, "max_trades": 1},
+        "london":  {"start": "13:00", "end": "16:30", "enabled": True, "max_trades": 1},
+        "newyork": {"start": "19:00", "end": "22:00", "enabled": True, "max_trades": 1},
     },
     "allowed_trading_window": {
         "start": "05:30",
@@ -37,6 +38,7 @@ DEFAULT_RULES = {
     },
     "allowed_symbols": [],  # empty = all symbols allowed
     "timezone": "Asia/Kolkata",
+    "bonus_rules": [],
 }
 
 # ── Settings cache (TTL = 15 s) ──────────────────────────────────────
@@ -67,6 +69,23 @@ def load_settings() -> dict:
                 pass
 
         result = loaded if loaded is not None else DEFAULT_RULES.copy()
+
+        # Check if pending_settings exist and have expired
+        if result.get("pending_settings") and result.get("lock_expiry"):
+            try:
+                expiry = datetime.fromisoformat(result["lock_expiry"])
+                if datetime.now(timezone.utc) >= expiry:
+                    # Apply pending settings
+                    for k, v in result["pending_settings"].items():
+                        result[k] = v
+                    result.pop("pending_settings", None)
+                    result.pop("lock_expiry", None)
+                    # Persist the unlocked settings
+                    with open(SETTINGS_FILE, "w") as f:
+                        json.dump(result, f, indent=2)
+            except Exception as e:
+                pass
+
         _settings_cache = result
         _settings_cache_at = now
         return result
@@ -116,18 +135,38 @@ def get_local_tz():
     return tz
 
 
-# Application config — Z.ai API for AI analysis (GLM 5.2)
-ZAI_API_KEY       = os.getenv("ZAI_API_KEY", "")
-# NVIDIA NIM API (still used for Llama Vision chart reading)
-NVIDIA_API_KEY    = os.getenv("NVIDIA_API_KEY", "")
+# ── AI Provider Configuration ────────────────────────────────────────
+# Set AI_PROVIDER to one of: "gemini", "openai", "openrouter", "groq", "huggingface", "zhipu", "zai"
+# Leave blank to auto-detect the first available provider.
+AI_PROVIDER  = os.getenv("AI_PROVIDER", "").lower().strip()
+AI_MODEL     = os.getenv("AI_MODEL", "")  # leave blank for provider default
+
+# Vision provider: "nvidia", "gemini", "openai", "openrouter" or blank for auto
+VISION_PROVIDER = os.getenv("VISION_PROVIDER", "").lower().strip()
+VISION_MODEL    = os.getenv("VISION_MODEL", "")  # leave blank for provider default
+
+# API Keys — populate whichever provider(s) you have access to
+ZAI_API_KEY        = os.getenv("ZAI_API_KEY", "")          # Z.ai / Zhipu GLM
+NVIDIA_API_KEY     = os.getenv("NVIDIA_API_KEY", "")       # NVIDIA NIM (vision — llama-3.2-11b)
+NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY", "")   # NVIDIA NIM (text — Llama3.3 Thinking)
+GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")       # Google Gemini
+OPENAI_API_KEY     = os.getenv("OPENAI_API_KEY", "")       # OpenAI GPT
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")   # OpenRouter
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")         # Groq
+HF_API_KEY         = os.getenv("HF_API_KEY", "")           # HuggingFace Inference API (hf_...)
+HF_MODEL           = os.getenv("HF_MODEL", "DavidAU/Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-Claude-4.5-Opus-High-Reasoning")
+
 METAAPI_TOKEN     = os.getenv("METAAPI_TOKEN", "")
 METAAPI_DOMAIN    = os.getenv("METAAPI_DOMAIN", "agiliumtrade.agiliumtrade.ai")
 HOST              = os.getenv("HOST", "0.0.0.0")
 PORT              = int(os.getenv("PORT", "8000"))
 
-# MT5 Connection Mode: "local" (desktop terminal) or "cloud" (MetaAPI)
+# MT5 Connection Mode: "local" (desktop terminal), "cloud" (MetaAPI), or "sync" (local agent pushes data)
 MT5_MODE = os.getenv("MT5_MODE", "local").lower().strip()
 MT5_PATH = os.getenv("MT5_PATH", "")
+
+# Sync agent authentication key (used when MT5_MODE == "sync")
+SYNC_API_KEY = os.getenv("SYNC_API_KEY", "")
 
 # Authentication config
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")

@@ -1,78 +1,58 @@
 """
-MT5 Access Controller — Prop Firm Safe Gatekeeper
+MT5 Access Controller — The 48-Hour Rule Locker
 ===================================================
 Controls when MetaTrader 5 is allowed to run on the local PC.
 Does NOT place, modify, or close any trades — only opens/closes the MT5 application.
 
-Session Schedule (IST):
-  Asia:     05:30 → 12:00  (1 trade)
-  London:   13:00 → 16:30  (1 trade, or 2 if Asia + London-1 both profitable)
-  New York: 19:00 → 22:00  (1 trade, only if daily loss ≤ 0.8%)
-
-State Machine:
-  MT5 opens at session start → user takes a trade → MT5 closes → locked until next session.
+Dynamic Rules:
+  Reads sessions and max limits from `settings.json`.
+  If limits are breached (Max Trades, Max Daily Loss), MT5 is locked.
 """
 
 import subprocess
 import json
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
+from config import load_settings, get_local_tz
 
 logger = logging.getLogger(__name__)
 
 STATE_FILE = Path(__file__).parent / "mt5_access_state.json"
 
-# ------------------------------------------------------------------ #
-#  Session definitions (IST — hour, minute)
-# ------------------------------------------------------------------ #
-SESSIONS = {
-    "asia":     {"start": (5, 30),  "end": (12, 0)},
-    "london":   {"start": (13, 0),  "end": (16, 30)},
-    "newyork":  {"start": (19, 0),  "end": (22, 0)},
-}
-
-
-def _to_minutes(h, m):
-    return h * 60 + m
-
+def _to_minutes(time_str):
+    if not time_str:
+        return 0
+    parts = time_str.split(":")
+    if len(parts) != 2:
+        return 0
+    return int(parts[0]) * 60 + int(parts[1])
 
 class MT5AccessController:
-    """
-    Background service that opens / closes the MT5 application
-    based on session rules and trade performance.
-    """
-
     def __init__(self, mt5_service=None, db_module=None):
         self.mt5 = mt5_service
         self.db = db_module
         self._state = self._load_state()
-        self._mt5_exe_path = None  # set via configure()
-        self._prev_entry_tickets = set()  # for new-trade detection
+        self._mt5_exe_path = None
         self._enabled = True
+        # Cache for _is_mt5_running() — expensive OS process scan, valid for 10s
+        self._mt5_running_cache: bool = False
+        self._mt5_running_cache_at: float = 0.0
 
-    # ------------------------------------------------------------------ #
-    #  Configuration
-    # ------------------------------------------------------------------ #
     def configure(self, exe_path: str = ""):
-        """Set the MT5 executable path. Auto-detects if blank."""
         if exe_path and Path(exe_path).exists():
             self._mt5_exe_path = exe_path
-            logger.info(f"MT5 Access Controller: exe path set to {exe_path}")
             return
 
-        # Auto-detect
         detected = self._auto_detect_mt5()
         if detected:
             self._mt5_exe_path = detected
-            logger.info(f"MT5 Access Controller: auto-detected exe at {detected}")
         else:
-            logger.warning("MT5 Access Controller: could not find terminal64.exe — please set MT5_PATH in .env")
+            logger.warning("MT5 Access Controller: could not find terminal64.exe")
 
     @staticmethod
     def _auto_detect_mt5() -> str:
-        """Search common locations for terminal64.exe."""
         candidates = []
         for base_dir in [
             os.environ.get("ProgramFiles", r"C:\Program Files"),
@@ -91,7 +71,6 @@ class MT5AccessController:
             except PermissionError:
                 continue
 
-        # Also check LOCALAPPDATA (some brokers install there)
         local_app = os.environ.get("LOCALAPPDATA", "")
         if local_app:
             for entry in Path(local_app).iterdir():
@@ -99,33 +78,32 @@ class MT5AccessController:
                     exe = entry / "terminal64.exe"
                     if exe.exists():
                         candidates.append(str(exe))
-
         return candidates[0] if candidates else ""
 
-    # ------------------------------------------------------------------ #
-    #  State persistence
-    # ------------------------------------------------------------------ #
+    # Maximum extra trades allowed per force-open activation
+    FORCE_OPEN_MAX_EXTRA = 2
+
     def _default_state(self, today_str: str = "") -> dict:
         return {
             "date": today_str,
-            "asia_entries": 0,
-            "london_entries": 0,
-            "ny_entries": 0,
-            "asia_profitable": None,        # True / False / None (unknown)
-            "london_trade1_profitable": None,
-            "ny_profitable": None,
+            "session_entries": {}, # dynamic session counts
             "daily_loss_pct": 0.0,
             "daily_pnl": 0.0,
             "account_balance": 0.0,
             "mt5_is_open": False,
-            "open_positions_count": 0,       # Live open positions
-            "current_session": None,         # "asia" / "london" / "newyork" / None
+            "open_positions_count": 0,
+            "current_session": None,
             "reason": "Initializing…",
-            "manual_override": None,         # "open" / "close" / None
-            "override_initial_trades": 0,    # Baseline for +2 limit
-            "total_entries": 0,              # Total trades today
+            "manual_override": None,
+            "override_initial_trades": 0,
+            "total_entries": 0,
             "last_checked": "",
-            "log": [],                       # Recent event log (max 20)
+            "log": [],
+            # Force-open tracking — user picks ONE session per day
+            "force_open_designated_session": None,  # user's chosen session for force-open today
+            "force_open_session": None,              # session where override is currently active
+            "force_open_trades_snapshot": 0,          # trade count when override was activated
+            "force_open_used": False,                 # whether force-open has been consumed today
         }
 
     def _load_state(self) -> dict:
@@ -143,12 +121,10 @@ class MT5AccessController:
         try:
             with open(STATE_FILE, "w") as f:
                 json.dump(self._state, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Failed to save access controller state: {e}")
+        except Exception:
+            pass
 
     def _add_log(self, msg: str):
-        """Append a timestamped log entry."""
-        from config import get_local_tz
         now = datetime.now(get_local_tz())
         entry = f"[{now.strftime('%H:%M:%S')}] {msg}"
         log = self._state.get("log", [])
@@ -157,64 +133,103 @@ class MT5AccessController:
             log = log[-20:]
         self._state["log"] = log
 
-    # ------------------------------------------------------------------ #
-    #  MT5 process management
-    # ------------------------------------------------------------------ #
     def _is_mt5_running(self) -> bool:
-        """Check if terminal64.exe is currently running."""
-        # Method 1: psutil
+        """Check if terminal64.exe is running. Result is cached for 10s to avoid
+        expensive OS process scans on every tick."""
+        import time as _time
+        now = _time.monotonic()
+        if now - self._mt5_running_cache_at < 10.0:
+            return self._mt5_running_cache
+
+        result = False
         try:
             import psutil
             for proc in psutil.process_iter(["name"]):
                 pname = proc.info.get("name", "") or ""
                 if "terminal64" in pname.lower():
-                    return True
-            return False
+                    result = True
+                    break
         except Exception:
-            pass
+            try:
+                res = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq terminal64.exe"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                result = "terminal64.exe" in res.stdout.lower()
+            except Exception:
+                pass
 
-        # Method 2: tasklist fallback (always tried if psutil fails for any reason)
-        try:
-            result = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq terminal64.exe"],
-                capture_output=True, text=True, timeout=5,
-            )
-            return "terminal64.exe" in result.stdout.lower()
-        except Exception:
-            pass
-
-        return False
+        self._mt5_running_cache = result
+        self._mt5_running_cache_at = now
+        return result
 
     def _open_mt5(self) -> bool:
-        """Launch the MT5 application."""
         if self._is_mt5_running():
             self._state["mt5_is_open"] = True
+            # MT5 is running — try to bring its window to the foreground
+            # (even if hidden, e.g. started by mt5.initialize() from Python)
+            try:
+                import ctypes
+                import ctypes.wintypes
+                user32 = ctypes.windll.user32
+                # Enumerate ALL windows (including hidden ones) to find terminal64
+                found_hwnd = [0]
+                WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+                def enum_callback(hwnd, lparam):
+                    # Check ALL windows, not just visible ones — MT5 started by
+                    # mt5.initialize() often has a hidden/minimized window
+                    pid = ctypes.wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    try:
+                        import psutil
+                        proc = psutil.Process(pid.value)
+                        if "terminal64" in proc.name().lower():
+                            # Prefer windows with a title (main window) over tool windows
+                            title_len = user32.GetWindowTextLengthW(hwnd)
+                            if title_len > 0 or found_hwnd[0] == 0:
+                                found_hwnd[0] = hwnd
+                                if title_len > 0:
+                                    return False  # found the main window, stop
+                    except Exception:
+                        pass
+                    return True
+                user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+                if found_hwnd[0]:
+                    SW_SHOW = 5
+                    SW_RESTORE = 9
+                    # First show the window (makes hidden windows visible)
+                    user32.ShowWindow(found_hwnd[0], SW_SHOW)
+                    # Then restore if minimized
+                    user32.ShowWindow(found_hwnd[0], SW_RESTORE)
+                    # Bring to foreground
+                    user32.SetForegroundWindow(found_hwnd[0])
+                    self._add_log("🟢 MT5 window brought to foreground")
+            except Exception:
+                pass  # best-effort: window focus is non-critical
             return True
 
         if not self._mt5_exe_path or not Path(self._mt5_exe_path).exists():
-            logger.warning("Cannot open MT5: executable path not found.")
             self._add_log("⚠️ Cannot open MT5 — exe path not found")
             return False
 
         try:
+            # Do NOT use DETACHED_PROCESS — that causes MT5 to open invisibly.
+            # Launch as a normal visible process.
             subprocess.Popen(
                 [self._mt5_exe_path],
                 shell=False,
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             )
+            # Invalidate the running-cache so the next check reflects the new process
+            self._mt5_running_cache_at = 0.0
             self._state["mt5_is_open"] = True
             reason = self._state.get("reason", "")
-            logger.info(f"🟢 MT5 OPENED — {reason}")
             self._add_log(f"🟢 MT5 OPENED — {reason}")
             return True
         except Exception as e:
-            logger.error(f"Failed to open MT5: {e}")
             self._add_log(f"❌ Failed to open MT5: {e}")
             return False
 
     def _close_mt5(self) -> bool:
-        """Terminate the MT5 application using multiple methods for reliability."""
-        # Disconnect our MT5 API service first (before killing the process)
         if self.mt5 and hasattr(self.mt5, "disconnect"):
             try:
                 self.mt5.disconnect()
@@ -222,84 +237,55 @@ class MT5AccessController:
                 pass
 
         closed = False
-
-        # Method 1: Try psutil (per-process granularity)
         try:
             import psutil
             for proc in psutil.process_iter(["name", "pid"]):
                 pname = proc.info.get("name", "") or ""
                 if "terminal64" in pname.lower():
-                    try:
-                        proc.kill()  # Hard kill (TerminateProcess on Windows)
-                        closed = True
-                        logger.info(f"psutil killed MT5 process PID {proc.info.get('pid')}")
-                    except Exception as e:
-                        logger.warning(f"psutil failed to kill MT5 PID {proc.info.get('pid')}: {e}")
-        except Exception as e:
-            logger.warning(f"psutil process scan failed: {e}")
+                    proc.kill()
+                    closed = True
+        except Exception:
+            pass
 
-        # Method 2: Always try taskkill /F as fallback (works even if psutil failed)
         if not closed:
             try:
                 result = subprocess.run(
                     ["taskkill", "/F", "/IM", "terminal64.exe"],
                     capture_output=True, text=True, timeout=10,
                 )
-                if result.returncode == 0:
+                if result.returncode == 0 or 128 == result.returncode or "not found" in result.stderr.lower():
                     closed = True
-                    logger.info(f"taskkill closed MT5: {result.stdout.strip()}")
-                else:
-                    # returncode 128 = process not found (already closed)
-                    if "not found" in result.stderr.lower() or result.returncode == 128:
-                        closed = True  # Already dead
-                        logger.info("MT5 process not found by taskkill — already closed")
-                    else:
-                        logger.warning(f"taskkill failed (rc={result.returncode}): {result.stderr.strip()}")
-            except Exception as e:
-                logger.error(f"taskkill subprocess error: {e}")
+            except Exception:
+                pass
 
         if closed:
             self._state["mt5_is_open"] = False
             reason = self._state.get("reason", "")
-            logger.info(f"🔴 MT5 CLOSED — {reason}")
             self._add_log(f"🔴 MT5 CLOSED — {reason}")
-        else:
-            logger.error("❌ ALL methods failed to close MT5!")
-            self._add_log("❌ Failed to close MT5 — all methods failed")
-
         return closed
 
-    # ------------------------------------------------------------------ #
-    #  Trade detection (reads MT5 state, never writes)
-    # ------------------------------------------------------------------ #
     def _count_session_entries_from_mt5(self, session_start_mins: int, session_end_mins: int) -> int:
-        """Count unique trade entries within a session window today using live MT5 data."""
         if not self.mt5 or not self.mt5.is_connected:
             return 0
 
-        from config import get_local_tz
         now = datetime.now(get_local_tz())
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
         s_h, s_m = divmod(session_start_mins, 60)
         e_h, e_m = divmod(session_end_mins, 60)
         sess_start = day_start.replace(hour=min(s_h, 23), minute=s_m)
-        # Handle end-of-day (1440 mins = 24:00) by clamping to 23:59:59
         if e_h >= 24:
             sess_end = day_start.replace(hour=23, minute=59, second=59)
         else:
             sess_end = day_start.replace(hour=e_h, minute=e_m)
 
-        # Get deals (entry=0 means trade opened)
         deals = self.mt5.get_deals(sess_start, min(sess_end, now))
         entries = [d for d in deals if d.get("entry") == 0]
 
-        # Filter out partial-close remainders using MT5 service logic
         entry_tickets = set()
         for e in entries:
             entry_tickets.add(e.get("position_id", e.get("ticket")))
 
-        # Also include currently open positions opened in this window
         positions = self.mt5.get_open_positions()
         for p in positions:
             try:
@@ -312,14 +298,10 @@ class MT5AccessController:
         return len(entry_tickets)
 
     def _get_session_pnl_from_db(self, session_start_mins: int, session_end_mins: int) -> list:
-        """Get closed trade P&L for a session window from the DB."""
         if not self.db:
             return []
-
-        from config import get_local_tz
         today = datetime.now(get_local_tz()).strftime("%Y-%m-%d")
         trades = self.db.get_trade_history(date=today, limit=100)
-
         results = []
         for t in trades:
             open_time_str = t.get("open_time") or t.get("time", "")
@@ -332,39 +314,112 @@ class MT5AccessController:
                     results.append(t)
             except Exception:
                 continue
-
         return results
 
-    def _update_trade_counts_and_pnl(self):
-        """Refresh trade counts and P&L from MT5 (live) or DB (fallback)."""
-        from config import get_local_tz
+    def _evaluate_bonus_rules(self, settings: dict, precomputed_stats: dict = None) -> dict:
+        """Evaluate dynamic bonus rules and return a dict of {session_name: bonus_trades}.
+        
+        Accepts precomputed_stats to avoid a redundant get_daily_stats() call when
+        _update_trade_counts_and_pnl() has already fetched it this tick.
+        """
+        bonus_trades = {}
+        bonus_rules = settings.get("bonus_rules", [])
+        if not bonus_rules:
+            return bonus_trades
 
-        asia_s = _to_minutes(*SESSIONS["asia"]["start"])
-        asia_e = _to_minutes(*SESSIONS["asia"]["end"])
-        london_s = _to_minutes(*SESSIONS["london"]["start"])
-        london_e = _to_minutes(*SESSIONS["london"]["end"])
-        ny_s = _to_minutes(*SESSIONS["newyork"]["start"])
-        ny_e = _to_minutes(*SESSIONS["newyork"]["end"])
+        # Use pre-computed stats if provided, otherwise fetch (fallback)
+        stats = precomputed_stats or {}
+        if not stats and self.mt5 and self.mt5.is_connected:
+            try:
+                stats = self.mt5.get_daily_stats()
+            except Exception:
+                pass
 
-        # If MT5 is connected, use live data
+        trade_sequence = stats.get("trade_sequence", [])
+        sessions = settings.get("sessions", {})
+        
+        def get_trade_session(t_str):
+            if not t_str: return None
+            try:
+                t = datetime.fromisoformat(t_str)
+                t_mins = t.hour * 60 + t.minute
+                for s_name, s_cfg in sessions.items():
+                    if not s_cfg.get("enabled", True): continue
+                    sm = _to_minutes(s_cfg.get("start", "00:00"))
+                    em = _to_minutes(s_cfg.get("end", "23:59"))
+                    if sm <= t_mins < em:
+                        return s_name
+            except Exception:
+                pass
+            return None
+
+        annotated_trades = []
+        for d in trade_sequence:
+            annotated_trades.append({
+                "profit": d.get("profit", 0),
+                "session": get_trade_session(d.get("open_time") or d.get("close_time"))
+            })
+
+        for rule in bonus_rules:
+            target = rule.get("target_session")
+            if not target: continue
+            
+            bt = rule.get("bonus_trades", 1)
+            conditions_met = True
+            
+            for cond in rule.get("conditions", []):
+                ctype = cond.get("type")
+                if ctype == "consecutive_wins":
+                    lookback = cond.get("lookback_trades", 1)
+                    src_session = cond.get("source_session", "all")
+                    
+                    if src_session == "all":
+                        relevant_trades = annotated_trades
+                    else:
+                        src_sessions_set = set(s.strip() for s in src_session.split(','))
+                        relevant_trades = [t for t in annotated_trades if t["session"] in src_sessions_set]
+
+                    recent = relevant_trades[-lookback:] if lookback > 0 else []
+                    if len(recent) < lookback or any(t["profit"] <= 0 for t in recent):
+                        conditions_met = False
+                        break
+            
+            if conditions_met:
+                bonus_trades[target] = bonus_trades.get(target, 0) + bt
+
+        return bonus_trades
+
+    def _update_trade_counts_and_pnl(self) -> dict:
+        """Update session trade counts and P&L. Returns the daily stats dict so it can
+        be reused by _evaluate_bonus_rules() without a second get_daily_stats() call."""
+        settings = load_settings()
+        sessions = settings.get("sessions", {})
+        
+        self._state.setdefault("session_entries", {})
+        cached_stats = {}
+
         if self.mt5 and self.mt5.is_connected:
-            self._state["asia_entries"] = self._count_session_entries_from_mt5(asia_s, asia_e)
-            self._state["london_entries"] = self._count_session_entries_from_mt5(london_s, london_e)
-            self._state["ny_entries"] = self._count_session_entries_from_mt5(ny_s, ny_e)
+            for s_name, s_cfg in sessions.items():
+                if not s_cfg.get("enabled", True):
+                    continue
+                start_mins = _to_minutes(s_cfg.get("start", "00:00"))
+                end_mins = _to_minutes(s_cfg.get("end", "23:59"))
+                count = self._count_session_entries_from_mt5(start_mins, end_mins)
+                self._state["session_entries"][s_name] = count
+            
             self._state["total_entries"] = self._count_session_entries_from_mt5(0, 1440)
 
-            # Position count — isolated from stats to prevent stale values
             try:
                 positions = self.mt5.get_open_positions()
                 self._state["open_positions_count"] = len(positions)
             except Exception:
                 pass
 
-            # Update daily P&L + balance
             try:
-                stats = self.mt5.get_daily_stats()
+                # Fetch daily_stats ONCE — result is returned and reused by _evaluate_bonus_rules
+                cached_stats = self.mt5.get_daily_stats()
                 account = self.mt5.get_account_info()
-                net_pnl = stats.get("net_pnl", 0.0)
+                net_pnl = cached_stats.get("net_pnl", 0.0)
                 balance = account.get("balance", 1.0) if account else 1.0
                 loss_pct = abs(net_pnl) / balance * 100 if net_pnl < 0 and balance > 0 else 0.0
                 self._state["daily_pnl"] = round(net_pnl, 2)
@@ -372,95 +427,79 @@ class MT5AccessController:
                 self._state["account_balance"] = round(balance, 2)
             except Exception:
                 pass
+        else:
+            if self.db:
+                today = datetime.now(get_local_tz()).strftime("%Y-%m-%d")
+                all_trades = self.db.get_trade_history(date=today, limit=200)
+                total_pnl = sum(t.get("profit", 0) for t in all_trades)
+                self._state["daily_pnl"] = round(total_pnl, 2)
+                balance = self._state.get("account_balance", 1.0) or 1.0
+                if balance > 0 and total_pnl < 0:
+                    self._state["daily_loss_pct"] = round(abs(total_pnl) / balance * 100, 2)
+                
+                self._state["total_entries"] = len(all_trades)
+                
+                for s_name, s_cfg in sessions.items():
+                    start_mins = _to_minutes(s_cfg.get("start", "00:00"))
+                    end_mins = _to_minutes(s_cfg.get("end", "23:59"))
+                    db_trades = self._get_session_pnl_from_db(start_mins, end_mins)
+                    self._state["session_entries"][s_name] = len(db_trades)
+                self._state["open_positions_count"] = 0
 
-        # Check P&L from DB for session profitability
-        asia_trades = self._get_session_pnl_from_db(asia_s, asia_e)
-        if asia_trades:
-            total_asia_pnl = sum(t.get("profit", 0) for t in asia_trades)
-            self._state["asia_profitable"] = total_asia_pnl > 0
+        return cached_stats
 
-        london_trades = self._get_session_pnl_from_db(london_s, london_e)
-        if london_trades:
-            # First London trade P&L
-            london_trades_sorted = sorted(london_trades, key=lambda t: t.get("open_time", ""))
-            first_trade_pnl = london_trades_sorted[0].get("profit", 0)
-            self._state["london_trade1_profitable"] = first_trade_pnl > 0
-
-        ny_trades = self._get_session_pnl_from_db(ny_s, ny_e)
-        if ny_trades:
-            ny_trades_sorted = sorted(ny_trades, key=lambda t: t.get("open_time", ""))
-            first_ny_pnl = ny_trades_sorted[0].get("profit", 0)
-            self._state["ny_profitable"] = first_ny_pnl > 0
-
-        # Fallback: use DB for daily loss if MT5 not connected
-        if not (self.mt5 and self.mt5.is_connected) and self.db:
-            from config import get_local_tz
-            today = datetime.now(get_local_tz()).strftime("%Y-%m-%d")
-            all_trades = self.db.get_trade_history(date=today, limit=200)
-            total_pnl = sum(t.get("profit", 0) for t in all_trades)
-            self._state["daily_pnl"] = round(total_pnl, 2)
-            # Use last known balance if available
-            balance = self._state.get("account_balance", 1.0) or 1.0
-            if balance > 0 and total_pnl < 0:
-                self._state["daily_loss_pct"] = round(abs(total_pnl) / balance * 100, 2)
-            
-            # Use DB for total_entries if MT5 not connected
-            self._state["total_entries"] = len(all_trades)
-            
-            # Update session entries from DB as well
-            asia_db_trades = self._get_session_pnl_from_db(asia_s, asia_e)
-            london_db_trades = self._get_session_pnl_from_db(london_s, london_e)
-            ny_db_trades = self._get_session_pnl_from_db(ny_s, ny_e)
-            self._state["asia_entries"] = len(asia_db_trades) if asia_db_trades else 0
-            self._state["london_entries"] = len(london_db_trades) if london_db_trades else 0
-            self._state["ny_entries"] = len(ny_db_trades) if ny_db_trades else 0
-
-            # Clear open positions count when MT5 is disconnected
-            self._state["open_positions_count"] = 0
-
-    # ------------------------------------------------------------------ #
-    #  Core tick — the state machine
-    # ------------------------------------------------------------------ #
     def tick(self):
-        """
-        Main evaluation — called every ~30 seconds.
-        Decides whether MT5 should be open or closed.
-        """
         if not self._enabled:
             return
 
-        from config import get_local_tz
         now = datetime.now(get_local_tz())
         today_str = now.strftime("%Y-%m-%d")
         current_mins = now.hour * 60 + now.minute
 
-        # ── New day reset ──
         if self._state.get("date") != today_str:
             self._state = self._default_state(today_str)
             self._state["log"] = [f"[{now.strftime('%H:%M:%S')}] 🌅 New trading day started"]
-            self._prev_entry_tickets = set()
-            logger.info("MT5 Access Controller: new day reset")
+            self._save_state()
 
-        # ── Connect to MT5 if it's running ──
         if self._is_mt5_running() and self.mt5:
             if not self.mt5.is_connected:
                 self.mt5.connect()
 
-        # ── Update trade counts and P&L ──
-        self._update_trade_counts_and_pnl()
+        # _update_trade_counts_and_pnl returns the daily_stats it already fetched
+        # so we can pass it into _evaluate_bonus_rules — eliminating a duplicate MT5 call.
+        cached_daily_stats = self._update_trade_counts_and_pnl()
 
-        # ── Manual override ──
         override = self._state.get("manual_override")
         if override == "open":
-            initial = self._state.get("override_initial_trades", 0)
-            current_total = self._state.get("total_entries", 0)
-            if current_total >= initial + 2:
-                self._state["manual_override"] = None
-                self._add_log("⚡ Manual override revoked (max 2 trades reached)")
-                override = None  # Fall through to normal session rules
+            # --- Force-open trade limit enforcement ---
+            fo_session = self._state.get("force_open_session")
+            if fo_session:
+                snapshot = self._state.get("force_open_trades_snapshot", 0)
+                current_trades = self._state.get("session_entries", {}).get(fo_session, 0)
+                extra_taken = current_trades - snapshot
+                remaining = max(0, self.FORCE_OPEN_MAX_EXTRA - extra_taken)
+
+                if extra_taken >= self.FORCE_OPEN_MAX_EXTRA:
+                    # 2 extra trades used up — auto-revoke override
+                    self._state["manual_override"] = None
+                    self._add_log(
+                        f"🔴 Force Open auto-revoked — {extra_taken} extra trade(s) taken in {fo_session.capitalize()} session"
+                    )
+                    # Don't return; fall through to normal evaluation so MT5 gets closed
+                else:
+                    self._state["mt5_is_open"] = True
+                    self._state["reason"] = (
+                        f"🚨 Force Open: {fo_session.capitalize()} session "
+                        f"({remaining} extra trade(s) remaining)"
+                    )
+                    self._open_mt5()
+                    self._state["last_checked"] = now.isoformat()
+                    self._save_state()
+                    return
             else:
+                # Regular manual override (not force-open)
                 self._state["mt5_is_open"] = True
-                self._state["reason"] = f"⚡ Manual override: OPEN (Trades: {current_total - initial}/2)"
+                self._state["reason"] = f"⚡ Manual override: OPEN"
                 self._open_mt5()
                 self._state["last_checked"] = now.isoformat()
                 self._save_state()
@@ -473,130 +512,56 @@ class MT5AccessController:
             self._save_state()
             return
 
-        # ── Session time boundaries (in minutes from midnight) ──
-        asia_s = _to_minutes(*SESSIONS["asia"]["start"])      # 330  (05:30)
-        asia_e = _to_minutes(*SESSIONS["asia"]["end"])          # 720  (12:00)
-        london_s = _to_minutes(*SESSIONS["london"]["start"])    # 780  (13:00)
-        london_e = _to_minutes(*SESSIONS["london"]["end"])      # 990  (16:30)
-        ny_s = _to_minutes(*SESSIONS["newyork"]["start"])       # 1140 (19:00)
-        ny_e = _to_minutes(*SESSIONS["newyork"]["end"])         # 1320 (22:00)
-
-        asia_entries = self._state.get("asia_entries", 0)
-        london_entries = self._state.get("london_entries", 0)
-        ny_entries = self._state.get("ny_entries", 0)
-        daily_loss_pct = self._state.get("daily_loss_pct", 0.0)
-        asia_profitable = self._state.get("asia_profitable")
-        london_t1_profitable = self._state.get("london_trade1_profitable")
+        settings = load_settings()
+        sessions = settings.get("sessions", {})
+        daily_loss_limit = settings.get("max_daily_loss_pct", 0.8)
+        current_daily_loss = self._state.get("daily_loss_pct", 0.0)
 
         should_open = False
         reason = ""
-        session = None
+        current_session = None
 
-        # ═══════════════════════════════════════════
-        # BEFORE ASIA (00:00 → 05:30)
-        # ═══════════════════════════════════════════
-        if current_mins < asia_s:
+        # Pass cached_daily_stats so bonus rules don't re-fetch from MT5
+        bonus_trades_map = self._evaluate_bonus_rules(settings, precomputed_stats=cached_daily_stats)
+        self._state["bonus_trades"] = bonus_trades_map  # save for get_status
+
+        if current_daily_loss > daily_loss_limit:
             should_open = False
-            reason = f"⏳ Before Asia session — opens at 05:30 IST"
-            session = None
-
-        # ═══════════════════════════════════════════
-        # ASIA SESSION (05:30 → 12:00)
-        # ═══════════════════════════════════════════
-        elif asia_s <= current_mins < asia_e:
-            session = "asia"
-            # Base limit is 1. If eligible for bonus, limit is 2.
-            asia_bonus_eligible = self._check_asia_bonus_eligible()
-            asia_limit = 2 if asia_bonus_eligible else 1
-            
-            if asia_entries < asia_limit:
-                should_open = True
-                if asia_entries == 1 and asia_bonus_eligible:
-                    reason = "🌏 Asia session OPEN — Floating bonus trade active ✅"
-                else:
-                    reason = f"🌏 Asia session OPEN — trades taken: {asia_entries}/{asia_limit}"
-            else:
-                should_open = False
-                reason = f"🌏 Asia trades completed ({asia_entries}/{asia_limit}) — MT5 locked until London 13:00"
-
-        # ═══════════════════════════════════════════
-        # GAP: ASIA → LONDON (12:00 → 13:00)
-        # ═══════════════════════════════════════════
-        elif asia_e <= current_mins < london_s:
-            should_open = False
-            reason = "⏳ Between sessions — London opens at 13:00 IST"
-            session = None
-
-        # ═══════════════════════════════════════════
-        # LONDON SESSION (13:00 → 16:30)
-        # ═══════════════════════════════════════════
-        elif london_s <= current_mins < london_e:
-            session = "london"
-
-            if london_entries == 0:
-                # London trade 1 — always allowed
-                should_open = True
-                reason = "🇬🇧 London session OPEN — trade 1 allowed"
-
-            elif london_entries == 1:
-                # London trade 2 (Bonus) — ONLY if ALL today's previous trades (Asia + London-1) are profitable
-                asia_is_good = (asia_entries == 0) or (asia_profitable is True)
-                
-                if asia_is_good and london_t1_profitable is True:
-                    should_open = True
-                    reason = "🇬🇧 London trade 2 unlocked — Floating trade active ✅"
-                elif not asia_is_good:
-                    should_open = False
-                    reason = "🇬🇧 London trade 2 blocked — Asia trades were a loss ❌"
-                elif london_t1_profitable is False:
-                    should_open = False
-                    reason = "🇬🇧 London trade 2 blocked — London trade 1 was a loss ❌"
-                else:
-                    # P&L unknown (trade still open or not synced)
-                    should_open = False
-                    reason = "🇬🇧 London trade 2 blocked — waiting for trade results"
-
-            else:
-                # 2+ trades taken
-                should_open = False
-                reason = f"🇬🇧 London trades completed ({london_entries}/2) — locked until NY"
-
-        # ═══════════════════════════════════════════
-        # GAP: LONDON → NEW YORK (16:30 → 19:00)
-        # ═══════════════════════════════════════════
-        elif london_e <= current_mins < ny_s:
-            should_open = False
-            reason = "⏳ Between sessions — New York opens at 19:00 IST"
-            session = None
-
-        # ═══════════════════════════════════════════
-        # NEW YORK SESSION (19:00 → 22:00)
-        # ═══════════════════════════════════════════
-        elif ny_s <= current_mins < ny_e:
-            session = "newyork"
-
-            if daily_loss_pct > 0.8:
-                should_open = False
-                reason = f"🇺🇸 NY blocked — daily loss {daily_loss_pct:.2f}% exceeds 0.8% limit 🛑"
-            elif ny_entries == 0:
-                should_open = True
-                reason = "🇺🇸 New York session OPEN — 1 trade allowed"
-            else:
-                should_open = False
-                reason = f"🇺🇸 NY trade taken ({ny_entries}/1) — done for the day ✅"
-
-        # ═══════════════════════════════════════════
-        # AFTER ALL SESSIONS (22:00+)
-        # ═══════════════════════════════════════════
+            reason = f"🛑 Blocked: Daily loss {current_daily_loss:.2f}% exceeds {daily_loss_limit}% limit"
         else:
-            should_open = False
-            reason = "🌙 Trading day complete — all sessions ended"
-            session = None
+            in_any_session = False
+            for s_name, s_cfg in sessions.items():
+                if not s_cfg.get("enabled", True):
+                    continue
+                start_mins = _to_minutes(s_cfg.get("start", "00:00"))
+                end_mins = _to_minutes(s_cfg.get("end", "23:59"))
+                
+                if start_mins <= current_mins < end_mins:
+                    in_any_session = True
+                    current_session = s_name
+                    trades_taken = self._state.get("session_entries", {}).get(s_name, 0)
+                    
+                    base_max = s_cfg.get("max_trades", 1)
+                    bonus = bonus_trades_map.get(s_name, 0)
+                    max_trades = base_max + bonus
+                    
+                    if trades_taken < max_trades:
+                        should_open = True
+                        if bonus > 0:
+                            reason = f"✅ {s_name.capitalize()} session OPEN ({trades_taken}/{max_trades} trades, +{bonus} bonus)"
+                        else:
+                            reason = f"✅ {s_name.capitalize()} session OPEN ({trades_taken}/{max_trades} trades)"
+                    else:
+                        should_open = False
+                        reason = f"🔒 {s_name.capitalize()} session limit reached ({trades_taken}/{max_trades} trades)"
+                    break
+            
+            if not in_any_session:
+                should_open = False
+                reason = "⏳ Outside of active trading sessions"
 
-        # ── Apply decision ──
         open_count = self._state.get("open_positions_count", 0)
         if not should_open and open_count > 0:
-            # Double-check with a live query to avoid stale state keeping MT5 open
             if self.mt5 and self.mt5.is_connected:
                 try:
                     live_positions = self.mt5.get_open_positions()
@@ -608,7 +573,7 @@ class MT5AccessController:
                 should_open = True
                 reason = f"{reason} — Kept OPEN due to {open_count} active trade(s)"
 
-        self._state["current_session"] = session
+        self._state["current_session"] = current_session
         self._state["reason"] = reason
         self._state["mt5_is_open"] = should_open
         self._state["last_checked"] = now.isoformat()
@@ -621,85 +586,53 @@ class MT5AccessController:
 
         self._save_state()
 
-    def _check_asia_bonus_eligible(self) -> bool:
-        """Check if Net P&L of Asia session over the last 2 trading days is profitable."""
-        if not self.db:
-            return False
-            
-        from config import get_local_tz
-        now = datetime.now(get_local_tz())
-        deals = self.db.get_trade_history(limit=500)
-        
-        asia_s_mins = _to_minutes(*SESSIONS["asia"]["start"])
-        asia_e_mins = _to_minutes(*SESSIONS["asia"]["end"])
-        
-        today_str = now.strftime("%Y-%m-%d")
-        daily_asia_pnl = {}
-        
-        for d in deals:
-            deal_time_str = d.get("open_time") or d.get("time", "")
-            if not deal_time_str:
-                continue
-            try:
-                dt = datetime.fromisoformat(deal_time_str).astimezone(get_local_tz())
-            except Exception:
-                continue
-                
-            day_str = dt.strftime("%Y-%m-%d")
-            
-            if day_str == today_str:
-                continue
-                
-            mins = dt.hour * 60 + dt.minute
-            if asia_s_mins <= mins <= asia_e_mins:
-                if day_str not in daily_asia_pnl:
-                    daily_asia_pnl[day_str] = 0.0
-                daily_asia_pnl[day_str] += float(d.get("profit", 0.0))
-                
-        past_days = sorted(daily_asia_pnl.keys(), reverse=True)
-        if len(past_days) < 2:
-            return False
-            
-        day1 = past_days[0]
-        day2 = past_days[1]
-        
-        total_profit = daily_asia_pnl[day1] + daily_asia_pnl[day2]
-        return total_profit > 0
-
-    # ------------------------------------------------------------------ #
-    #  Public API
-    # ------------------------------------------------------------------ #
     def get_status(self) -> dict:
-        """Return current state for the REST API / frontend."""
-        from config import get_local_tz
         now = datetime.now(get_local_tz())
+        settings = load_settings()
+        sessions = settings.get("sessions", {})
+        bonus_trades_map = self._state.get("bonus_trades", {})
+        
+        session_status = {}
+        for s_name, s_cfg in sessions.items():
+            base_max = s_cfg.get("max_trades", 1)
+            bonus = bonus_trades_map.get(s_name, 0)
+            session_status[s_name] = {
+                "start": s_cfg.get("start"),
+                "end": s_cfg.get("end"),
+                "trades_taken": self._state.get("session_entries", {}).get(s_name, 0),
+                "max_trades": base_max + bonus,
+                "bonus_trades": bonus,
+            }
+
+        # Determine which session we're currently in
         current_mins = now.hour * 60 + now.minute
+        active_session = None
+        for s_name, s_cfg in sessions.items():
+            if not s_cfg.get("enabled", True):
+                continue
+            sm = _to_minutes(s_cfg.get("start", "00:00"))
+            em = _to_minutes(s_cfg.get("end", "23:59"))
+            if sm <= current_mins < em:
+                active_session = s_name
+                break
 
-        # Calculate next session open time
-        next_open = None
-        asia_s = _to_minutes(*SESSIONS["asia"]["start"])
-        london_s = _to_minutes(*SESSIONS["london"]["start"])
-        ny_s = _to_minutes(*SESSIONS["newyork"]["start"])
+        # Force-open is disabled if already used today
+        fo_used = self._state.get("force_open_used", False)
+        fo_designated = self._state.get("force_open_designated_session")
 
-        if current_mins < asia_s:
-            next_open = "05:30 IST (Asia)"
-        elif current_mins < london_s:
-            next_open = "13:00 IST (London)"
-        elif current_mins < ny_s:
-            next_open = "19:00 IST (New York)"
-        else:
-            next_open = "05:30 IST tomorrow (Asia)"
+        # Compute remaining extra trades if force-open is active
+        fo_extra_remaining = 0
+        fo_session = self._state.get("force_open_session")
+        if fo_session and self._state.get("manual_override") == "open":
+            snapshot = self._state.get("force_open_trades_snapshot", 0)
+            current_trades = self._state.get("session_entries", {}).get(fo_session, 0)
+            fo_extra_remaining = max(0, self.FORCE_OPEN_MAX_EXTRA - (current_trades - snapshot))
 
-        asia_s = _to_minutes(*SESSIONS["asia"]["start"])
-        asia_e = _to_minutes(*SESSIONS["asia"]["end"])
-        in_asian_session = asia_s <= current_mins < asia_e
-
-        force_open_disabled = (
-            not in_asian_session or
-            self._state.get("asia_entries", 0) >= 2 or
-            self._state.get("london_entries", 0) >= 2 or
-            self._state.get("ny_entries", 0) >= 2
-        )
+        # List of enabled session names for the frontend selector
+        enabled_sessions = [
+            s_name for s_name, s_cfg in sessions.items()
+            if s_cfg.get("enabled", True)
+        ]
 
         return {
             **self._state,
@@ -708,59 +641,17 @@ class MT5AccessController:
             "mt5_exe_path": self._mt5_exe_path or "",
             "controller_enabled": self._enabled,
             "current_time": now.strftime("%H:%M:%S IST"),
-            "next_session_open": next_open,
-            "force_open_disabled": force_open_disabled,
-            "sessions": {
-                "asia": {
-                    "start": "05:30", "end": "12:00",
-                    "trades_taken": self._state.get("asia_entries", 0),
-                    "max_trades": 2 if self._check_asia_bonus_eligible() else 1,
-                    "profitable": self._state.get("asia_profitable"),
-                },
-                "london": {
-                    "start": "13:00", "end": "16:30",
-                    "trades_taken": self._state.get("london_entries", 0),
-                    "max_trades": 2 if ((self._state.get("asia_entries", 0) == 0 or self._state.get("asia_profitable")) and self._state.get("london_trade1_profitable")) else 1,
-                    "trade1_profitable": self._state.get("london_trade1_profitable"),
-                },
-                "newyork": {
-                    "start": "19:00", "end": "22:00",
-                    "trades_taken": self._state.get("ny_entries", 0),
-                    "max_trades": 1,
-                    "blocked_by_loss": self._state.get("daily_loss_pct", 0) > 0.8,
-                    "profitable": self._state.get("ny_profitable"),
-                },
-            },
+            "force_open_disabled": fo_used,
+            "force_open_designated_session": fo_designated,
+            "force_open_extra_remaining": fo_extra_remaining,
+            "force_open_active_session": fo_session,
+            "active_session": active_session,
+            "enabled_sessions": enabled_sessions,
+            "sessions": session_status,
         }
 
-    def _is_asian_session(self) -> bool:
-        """Return True if current time is within the Asian session window."""
-        from config import get_local_tz
-        now = datetime.now(get_local_tz())
-        current_mins = now.hour * 60 + now.minute
-        asia_s = _to_minutes(*SESSIONS["asia"]["start"])
-        asia_e = _to_minutes(*SESSIONS["asia"]["end"])
-        return asia_s <= current_mins < asia_e
-
     def set_override(self, action: str):
-        """Set manual override: 'open', 'close', or 'clear'."""
         if action == "open":
-            # Force open only allowed during Asian session
-            if not self._is_asian_session():
-                self._add_log("❌ Force Open blocked — only allowed during Asian session (05:30–12:00 IST)")
-                return
-
-            # Check if disabled due to >= 2 trades in a session
-            force_open_disabled = (
-                self._state.get("asia_entries", 0) >= 2 or
-                self._state.get("london_entries", 0) >= 2 or
-                self._state.get("ny_entries", 0) >= 2
-            )
-            if force_open_disabled:
-                self._add_log("❌ Force Open blocked — 2 trades taken")
-                return
-
-            self._state["override_initial_trades"] = self._state.get("total_entries", 0)
             self._state["manual_override"] = "open"
             self._add_log("⚡ Manual override set: OPEN")
         elif action == "close":
@@ -768,32 +659,101 @@ class MT5AccessController:
             self._add_log("⚡ Manual override set: CLOSE")
         else:
             self._state["manual_override"] = None
+            # Clear active force-open session tracking (but keep designated + used flag)
+            self._state["force_open_session"] = None
+            self._state["force_open_trades_snapshot"] = 0
             self._add_log("⚡ Manual override cleared — automatic mode")
         self._save_state()
 
+    def set_force_open_session(self, session_name: str) -> dict:
+        """Designate which session gets the force-open privilege today.
+        Can only be set ONCE per day — once chosen, it's locked."""
+        if self._state.get("force_open_used", False):
+            return {"ok": False, "reason": "Force Open already used today"}
+
+        if self._state.get("force_open_designated_session"):
+            return {"ok": False, "reason": f"Already designated to {self._state['force_open_designated_session'].capitalize()} session — locked for today"}
+
+        settings = load_settings()
+        sessions = settings.get("sessions", {})
+        if session_name not in sessions or not sessions[session_name].get("enabled", True):
+            return {"ok": False, "reason": f"Session '{session_name}' not found or disabled"}
+
+        self._state["force_open_designated_session"] = session_name
+        self._add_log(f"🎯 Force Open designated for {session_name.capitalize()} session")
+        self._save_state()
+        return {"ok": True, "session": session_name}
+
     def force_open(self) -> bool:
-        """Emergency override: open MT5, but ONLY during Asian session."""
-        if not self._is_asian_session():
-            self._add_log("❌ Force Open blocked — only allowed during Asian session (05:30–12:00 IST)")
+        """Emergency override: opens MT5 for max 2 extra trades in the designated session.
+        User must first designate a session. Can only be used ONCE per day.
+        Automatically revokes after 2 extra trades."""
+        now = datetime.now(get_local_tz())
+        current_mins = now.hour * 60 + now.minute
+        settings = load_settings()
+        sessions = settings.get("sessions", {})
+
+        # Check if already used today
+        if self._state.get("force_open_used", False):
+            self._add_log("❌ Force Open DENIED — already used today")
+            self._save_state()
             return False
-        self._state["override_initial_trades"] = self._state.get("total_entries", 0)
+
+        # Check if a session has been designated
+        designated = self._state.get("force_open_designated_session")
+        if not designated:
+            self._add_log("❌ Force Open DENIED — no session selected")
+            self._save_state()
+            return False
+
+        # Find the current active session
+        active_session = None
+        for s_name, s_cfg in sessions.items():
+            if not s_cfg.get("enabled", True):
+                continue
+            sm = _to_minutes(s_cfg.get("start", "00:00"))
+            em = _to_minutes(s_cfg.get("end", "23:59"))
+            if sm <= current_mins < em:
+                active_session = s_name
+                break
+
+        if not active_session:
+            self._add_log("❌ Force Open DENIED — not inside any trading session")
+            self._save_state()
+            return False
+
+        # Must be inside the designated session
+        if active_session != designated:
+            self._add_log(
+                f"❌ Force Open DENIED — designated for {designated.capitalize()}, "
+                f"but currently in {active_session.capitalize()} session"
+            )
+            self._save_state()
+            return False
+
+        # Snapshot the current trade count so we can track extra trades
+        current_trades = self._state.get("session_entries", {}).get(designated, 0)
+
         self._state["manual_override"] = "open"
-        self._add_log("🚨 EMERGENCY OVERRIDE: Force Open (Asian session)")
+        self._state["force_open_session"] = designated
+        self._state["force_open_trades_snapshot"] = current_trades
+        self._state["force_open_used"] = True
+
+        self._add_log(
+            f"🚨 EMERGENCY OVERRIDE: Force Open ({designated.capitalize()} session, "
+            f"max {self.FORCE_OPEN_MAX_EXTRA} extra trades)"
+        )
         self._save_state()
         return True
 
     def reset_day(self):
-        """Reset all daily state (useful for testing)."""
-        from config import get_local_tz
         now = datetime.now(get_local_tz())
         self._state = self._default_state(now.strftime("%Y-%m-%d"))
         self._state["log"] = [f"[{now.strftime('%H:%M:%S')}] 🔄 Day reset manually"]
-        self._prev_entry_tickets = set()
         self._save_state()
         self._add_log("🔄 Daily state reset")
 
     def set_enabled(self, enabled: bool):
-        """Enable or disable the controller."""
         self._enabled = enabled
         self._add_log(f"Controller {'enabled' if enabled else 'disabled'}")
         self._save_state()

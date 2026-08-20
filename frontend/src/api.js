@@ -115,6 +115,7 @@ export const api = {
     body: JSON.stringify(body),
   }),
   analysisHistory: (date) => apiFetch(`/analysis/history${date ? `?date=${date}` : ''}`),
+  aiStatus: () => apiFetch('/ai-status'),
 
   // Settings
   getSettings: () => apiFetch('/settings'),
@@ -180,4 +181,16 @@ export const api = {
   }),
   mt5AccessForceOpen: () => apiFetch('/mt5-access/force-open', { method: 'POST' }),
   mt5AccessReset: () => apiFetch('/mt5-access/reset', { method: 'POST' }),
+
+  // Morning Ritual
+  getRitual: () => apiFetch('/ritual/today'),
+  completeRitual: (body) => apiFetch('/ritual/complete', { method: 'POST', body: JSON.stringify(body) }),
+
+  // Pre-Trade Gate
+  logPreTrade: (body) => apiFetch('/pre-trade/log', { method: 'POST', body: JSON.stringify(body) }),
+  getPreTradeLogs: (date) => apiFetch(`/pre-trade/logs${date ? `?date=${date}` : ''}`),
+
+  // Post-Trade Reflection
+  logReflection: (body) => apiFetch('/reflection/log', { method: 'POST', body: JSON.stringify(body) }),
+  getReflections: (date) => apiFetch(`/reflection/logs${date ? `?date=${date}` : ''}`),
 };

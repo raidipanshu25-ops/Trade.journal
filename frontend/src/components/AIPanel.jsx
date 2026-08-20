@@ -3,12 +3,13 @@ import ReactMarkdown from 'react-markdown';
 import { api } from '../api';
 
 /**
- * AI Analysis panel — io.net styled with gradient badge and shimmer loading.
+ * AI Analysis panel — dynamic provider badge + shimmer loading.
  */
 export function AIPanel({ aiAvailable }) {
   const [analysis, setAnalysis] = useState(null);
   const [loading, setLoading] = useState(false);
   const [customPrompt, setCustomPrompt] = useState('');
+  const [aiStatus, setAiStatus] = useState(null);
 
   useEffect(() => {
     const today = new Date().toISOString().split('T')[0];
@@ -17,6 +18,9 @@ export function AIPanel({ aiAvailable }) {
         setAnalysis(res);
       }
     }).catch(console.error);
+
+    // Fetch AI provider status
+    api.aiStatus().then(setAiStatus).catch(console.error);
   }, []);
 
   const runAnalysis = async () => {
@@ -49,6 +53,28 @@ export function AIPanel({ aiAvailable }) {
     }
   };
 
+  // Determine badge label from status
+  const providerLabel = aiStatus?.analyzer?.provider
+    ? aiStatus.analyzer.provider.toUpperCase()
+    : 'Z.ai';
+  const modelLabel = aiStatus?.analyzer?.model || '';
+  const isProviderAvailable = aiStatus?.analyzer?.available ?? aiAvailable;
+
+  // Provider badge color map
+  const badgeColors = {
+    gemini:       'linear-gradient(135deg, #4285f4, #0f9d58)',
+    openai:       'linear-gradient(135deg, #10a37f, #1a7f64)',
+    openrouter:   'linear-gradient(135deg, #7c3aed, #4f46e5)',
+    groq:         'linear-gradient(135deg, #f59e0b, #d97706)',
+    huggingface:  'linear-gradient(135deg, #ff9d00, #e67e00)',
+    'nvidia-nim': 'linear-gradient(135deg, #76b900, #3a7000)',
+    nvidia:       'linear-gradient(135deg, #76b900, #4a8a00)',
+    zai:          'linear-gradient(135deg, #4a9eff, #3b82f6)',
+    none:         'linear-gradient(135deg, #6b7280, #4b5563)',
+  };
+  const providerKey = aiStatus?.analyzer?.provider || 'zai';
+  const badgeBg = badgeColors[providerKey] || badgeColors.zai;
+
   return (
     <div className="ai-panel" id="ai-panel">
       <div className="ai-panel-header">
@@ -61,7 +87,18 @@ export function AIPanel({ aiAvailable }) {
             <path d="M12 14v-4"/>
           </svg>
           AI Trading Coach
-          <span className="ai-badge">Z.ai</span>
+          <span
+            className="ai-badge"
+            style={{ background: badgeBg }}
+            title={modelLabel ? `Model: ${modelLabel}` : undefined}
+          >
+            {providerLabel}
+          </span>
+          {!isProviderAvailable && (
+            <span style={{ fontSize: '0.7rem', color: 'var(--red)', marginLeft: 6, fontWeight: 500 }}>
+              ⚠ Offline
+            </span>
+          )}
         </h3>
         <button
           className="btn btn-primary"
@@ -99,6 +136,39 @@ export function AIPanel({ aiAvailable }) {
         </div>
       </div>
 
+      {/* Active provider info strip */}
+      {aiStatus && (
+        <div style={{
+          padding: '8px 20px',
+          borderBottom: `1px solid var(--border)`,
+          display: 'flex',
+          gap: 16,
+          alignItems: 'center',
+          fontSize: '0.72rem',
+          color: 'var(--text-2)',
+          background: 'var(--bg-2)',
+          flexWrap: 'wrap',
+        }}>
+          <span>
+            <span style={{ color: 'var(--text-3)' }}>Provider: </span>
+            <span style={{ color: isProviderAvailable ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
+              {isProviderAvailable ? providerLabel : 'None'}
+            </span>
+          </span>
+          {modelLabel && (
+            <span>
+              <span style={{ color: 'var(--text-3)' }}>Model: </span>
+              <code style={{ color: 'var(--cyan)', fontFamily: 'var(--mono)', fontSize: '0.7rem' }}>{modelLabel}</code>
+            </span>
+          )}
+          {!isProviderAvailable && (
+            <span style={{ color: 'var(--yellow)' }}>
+              Add <code style={{ fontFamily: 'var(--mono)' }}>GEMINI_API_KEY</code>, <code style={{ fontFamily: 'var(--mono)' }}>OPENAI_API_KEY</code>, or <code style={{ fontFamily: 'var(--mono)' }}>GROQ_API_KEY</code> to <code style={{ fontFamily: 'var(--mono)' }}>backend/.env</code>
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="ai-content">
         {!analysis && !loading && (
           <div className="empty-state">
@@ -113,9 +183,9 @@ export function AIPanel({ aiAvailable }) {
             </div>
             <h3>Analysis Ready</h3>
             <p>
-              {aiAvailable
-                ? 'Click "Run Analysis" to get professional insights about your trading performance.'
-                : 'Add your NVIDIA API key in backend/.env to enable AI analysis. Basic mode is available.'}
+              {isProviderAvailable
+                ? `Click "Run Analysis" to get professional insights from AXIOM. Using ${providerLabel}${modelLabel ? ` (${modelLabel})` : ''}.`
+                : 'No AI provider available. Add GEMINI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, or GROQ_API_KEY in backend/.env and restart the server.'}
             </p>
           </div>
         )}
@@ -137,3 +207,5 @@ export function AIPanel({ aiAvailable }) {
     </div>
   );
 }
+
+

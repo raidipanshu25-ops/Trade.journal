@@ -114,7 +114,29 @@ class DisciplineChecker:
     def _check_daily_trade_count(self, rules: dict) -> list[dict]:
         """Alert if total trades today exceed the daily limit."""
         alerts = []
-        max_daily = 4 # Prop Firm absolute max: Asia(1) + London(2) + NY(1)
+        sessions = rules.get("sessions", {})
+        
+        # Get bonus trades from mt5 access state
+        bonus_trades_map = {}
+        try:
+            import json
+            from pathlib import Path
+            state_file = Path(__file__).parent / "mt5_access_state.json"
+            if state_file.exists():
+                with open(state_file, "r") as f:
+                    bonus_trades_map = json.load(f).get("bonus_trades", {})
+        except Exception:
+            pass
+
+        # Calculate daily max by summing active session max trades + bonus trades
+        max_daily = 0
+        for name, sess in sessions.items():
+            if sess.get("enabled", True):
+                max_daily += sess.get("max_trades", 1) + bonus_trades_map.get(name, 0)
+                
+        if max_daily == 0:
+            max_daily = 4  # fallback
+
         count = self.mt5.count_trades_today()
         if count > max_daily:
             alerts.append(self._make_alert(
@@ -131,20 +153,22 @@ class DisciplineChecker:
         return alerts
 
     def _check_session_trades(self, rules: dict) -> tuple[list[dict], list[dict]]:
-        """Check each session's trade count using Prop Firm Session rules.
-        Asia: Max 1
-        London: Max 1 (or 2 if Asia and London-1 are profitable)
-        New York: Max 1
-        """
+        """Check each session's trade count against configured limits."""
         alerts = []
         session_stats = []
         sessions = rules.get("sessions", {})
-        
-        prop_firm_limits = {
-            "asia": 2,
-            "london": 2,  # Strict controller blocks trade 2 if conditions aren't met
-            "newyork": 1
-        }
+
+        # Get bonus trades from mt5 access state
+        bonus_trades_map = {}
+        try:
+            import json
+            from pathlib import Path
+            state_file = Path(__file__).parent / "mt5_access_state.json"
+            if state_file.exists():
+                with open(state_file, "r") as f:
+                    bonus_trades_map = json.load(f).get("bonus_trades", {})
+        except Exception:
+            pass
 
         # Track position_ids already counted so overlapping sessions don't double-count
         counted_positions = set()
@@ -165,7 +189,9 @@ class DisciplineChecker:
             for e in unique_entries:
                 counted_positions.add(e.get("position_id", e.get("ticket")))
 
-            effective_limit = prop_firm_limits.get(name, 1)
+            base_limit = cfg.get("max_trades", 1)
+            bonus = bonus_trades_map.get(name, 0)
+            effective_limit = base_limit + bonus
 
             within_limit = count <= effective_limit
 

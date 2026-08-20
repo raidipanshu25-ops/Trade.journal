@@ -74,6 +74,17 @@ class DisciplineReport(BaseModel):
     ai_analysis: Optional[str] = None
 
 
+class BonusCondition(BaseModel):
+    type: str = "consecutive_wins"  # Type of condition
+    lookback_trades: int = 2        # How many trades to check
+    source_session: str = "asia"    # "all", "asia", etc.
+
+class BonusRule(BaseModel):
+    id: str
+    target_session: str
+    bonus_trades: int = 1
+    conditions: list[BonusCondition] = []
+
 class RulesConfig(BaseModel):
     timezone: str = "Asia/Kolkata"
     max_lot_size: float = 1.0
@@ -83,6 +94,9 @@ class RulesConfig(BaseModel):
     sessions: dict = {}
     allowed_trading_window: dict = {}
     allowed_symbols: list[str] = []
+    bonus_rules: list[BonusRule] = []
+    pending_settings: Optional[dict] = None
+    lock_expiry: Optional[str] = None
 
 
 class AIAnalysisRequest(BaseModel):

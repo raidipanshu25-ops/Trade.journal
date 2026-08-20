@@ -31,39 +31,37 @@ Every 30 seconds, the system checks:
 
 ---
 
-### 📅 Your Day, Divided Into 3 Sessions
+### ⏳ The 48-Hour Rule Locker (No More Changing Rules Mid-Session)
 
-No more sitting in front of charts for 14 hours. You get **specific windows** to trade, with **strict limits** on each:
+Every trader knows the feeling: you hit your max loss, you get tilted, and you go into your settings to "allow one more trade." **Not anymore.**
+
+The system has a built-in psychological defense mechanism:
+- 📉 **Tightening Risk:** Want to decrease your daily loss limit? Happens instantly.
+- 📈 **Loosening Risk:** Want to increase your daily loss limit or add more trades? **You are locked out for 48 Hours.** 
+
+If you try to loosen your rules to take a revenge trade, the system puts those new rules into a pending queue with a giant 48-hour countdown timer. You physically cannot overtrade or destroy your risk management while you are emotional.
+
+---
+
+### 📅 Your Custom Sessions & Limits
+
+No more sitting in front of charts for 14 hours. You set **specific windows** to trade, with **strict limits** on each. You define the rules; the controller just enforces them.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                                                              │
-│   🌏 ASIA        05:30 → 12:00 IST      1 Trade allowed     │
-│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─     │
-│   🇬🇧 LONDON      13:00 → 16:30 IST      1 Trade allowed     │
-│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─     │
-│   🇺🇸 NEW YORK    19:00 → 22:00 IST      1 Trade allowed     │
+│   🌏 ASIA        Your Time → Your Time      Your Max Trades  │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─          │
+│   🇬🇧 LONDON      Your Time → Your Time      Your Max Trades  │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─          │
+│   🇺🇸 NEW YORK    Your Time → Your Time      Your Max Trades  │
 │                                                              │
 │   ⛔ Between sessions → MT5 is CLOSED. No exceptions.        │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Maximum 3 trades per day.** That's it. No overtrading. No "just one more."
-
----
-
-### 🏆 Want More Trades? Earn Them.
-
-Extra trades aren't given — they're **unlocked through consistent performance:**
-
-| Bonus | How You Earn It |
-|-------|----------------|
-| **+1 Asia trade** | Your last 2 days of Asia trades must both be profitable |
-| **+1 London trade** | Asia trade today was green ✅ AND London trade 1 was green ✅ |
-| **NY session access** | Only if your daily loss is under 0.8%. Lose more → NY is locked for the day |
-
-> 💡 **Simple idea:** The system rewards you for being consistent, not for trading more. If you're winning with quality setups, you earn the right to take more. If you're losing, it protects you from yourself.
+**Once you hit your max trades for that session, you're done.** No overtrading. No "just one more."
 
 ---
 

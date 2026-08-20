@@ -102,13 +102,18 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
   };
 
   const handleForceOpen = async () => {
-    if (!confirm('⚠️ EMERGENCY OVERRIDE\n\nThis bypasses ALL safety checks and opens MT5 immediately.\n\nAre you sure?')) return;
+    if (!confirm('⚠️ EMERGENCY OVERRIDE\n\nThis will open MT5 for a maximum of 2 extra trades in the current session.\nYou can only use this ONCE per session.\n\nAre you sure?')) return;
     setOverrideLoading('force_open');
     try {
       const data = await api.mt5AccessForceOpen();
       setStatus(data.state);
     } catch (err) {
       console.error('Force open error:', err);
+      // Try to extract updated state from the error response
+      try {
+        const errData = err?.response?.data?.detail;
+        if (errData?.state) setStatus(errData.state);
+      } catch (_) {}
     } finally {
       setOverrideLoading('');
     }
@@ -261,7 +266,7 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
               borderColor: status.force_open_disabled ? 'var(--border)' : 'var(--green-border)',
               cursor: status.force_open_disabled ? 'not-allowed' : 'pointer',
             }}
-            title={status.force_open_disabled ? 'Disabled — 2 trades already taken in a session' : 'Override: open MT5 (max 2 extra trades)'}
+            title={status.force_open_disabled ? 'Disabled — already used in this session or outside trading hours' : 'Override: open MT5 (max 2 extra trades, once per session)'}
             id="mt5-force-open"
           >
             {overrideLoading === 'open' ? 'Opening…' : 'Force Open'}
@@ -271,17 +276,28 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
           <button
             className="btn btn-secondary"
             onClick={handleForceOpen}
-            disabled={overrideLoading === 'force_open'}
+            disabled={true}
             style={{
               fontSize: '0.73rem', padding: '5px 12px',
-              background: 'var(--amber-dim)', color: 'var(--amber)',
-              borderColor: 'var(--amber-border)',
+              background: 'var(--bg-3)', color: 'var(--text-3)',
+              borderColor: 'var(--border)', cursor: 'not-allowed',
+              opacity: 0.5,
             }}
-            title="Emergency: bypass all safety checks and open MT5"
+            title="Force Open already used in this session"
             id="mt5-emergency-override"
           >
-            {overrideLoading === 'force_open' ? 'Opening…' : '⚠ Force Open'}
+            ⚠ Force Open Used
           </button>
+        )}
+        {/* Show remaining extra trades when force-open is active */}
+        {isOpen && status.force_open_active_session && status.force_open_extra_remaining > 0 && (
+          <div style={{
+            fontSize: '0.68rem', padding: '4px 10px', borderRadius: '4px',
+            background: 'var(--amber-dim)', border: '1px solid var(--amber-border)',
+            color: 'var(--amber)', fontFamily: 'var(--mono)', fontWeight: 600,
+          }}>
+            🚨 {status.force_open_extra_remaining} extra trade(s) remaining
+          </div>
         )}
         {hasOverride && (
           <button

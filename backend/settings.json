@@ -6,17 +6,20 @@
     "asia": {
       "start": "05:30",
       "end": "12:00",
-      "enabled": true
+      "enabled": true,
+      "max_trades": 1
     },
     "london": {
       "start": "13:00",
       "end": "16:30",
-      "enabled": true
+      "enabled": true,
+      "max_trades": 1
     },
     "newyork": {
       "start": "19:00",
       "end": "22:00",
-      "enabled": true
+      "enabled": true,
+      "max_trades": 1
     }
   },
   "allowed_trading_window": {
@@ -24,5 +27,33 @@
     "end": "22:00",
     "enabled": true
   },
-  "allowed_symbols": []
+  "allowed_symbols": [],
+  "bonus_rules": [
+    {
+      "id": "rule_1784515845774",
+      "target_session": "asia",
+      "bonus_trades": 1,
+      "conditions": [
+        {
+          "type": "consecutive_wins",
+          "lookback_trades": 2,
+          "source_session": "asia"
+        }
+      ]
+    },
+    {
+      "id": "rule_1784515862156",
+      "target_session": "london",
+      "bonus_trades": 1,
+      "conditions": [
+        {
+          "type": "consecutive_wins",
+          "lookback_trades": 2,
+          "source_session": "london"
+        }
+      ]
+    }
+  ],
+  "timezone": "Asia/Kolkata",
+  "auto_enforce_rules": false
 }

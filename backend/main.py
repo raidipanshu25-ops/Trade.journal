@@ -17,14 +17,14 @@ from config import get_local_tz
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Depends
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from config import load_settings, save_settings, METAAPI_TOKEN, HOST, PORT, ADMIN_PASSWORD, GOOGLE_CLIENT_ID, AUTHORIZED_EMAILS, MT5_MODE, MT5_PATH, ALLOW_REGISTRATION, SECRET_KEY
+from config import load_settings, save_settings, METAAPI_TOKEN, HOST, PORT, ADMIN_PASSWORD, GOOGLE_CLIENT_ID, AUTHORIZED_EMAILS, MT5_MODE, MT5_PATH, ALLOW_REGISTRATION, SECRET_KEY, SYNC_API_KEY
 from auth import (create_access_token, verify_ws_token, hash_password, verify_password,
                   hash_token, extract_user_from_token, generate_totp_secret, verify_totp,
                   get_totp_provisioning_uri, generate_qr_code_base64)
@@ -82,8 +82,21 @@ if MT5_MODE == "local":
         logger.info("MT5 local mode enabled — will connect to desktop terminal.")
     except ImportError:
         logger.warning("MetaTrader5 package not installed — falling back to cloud mode.")
+elif MT5_MODE == "sync":
+    logger.info("MT5 sync mode enabled — waiting for local agent to push data.")
 else:
     logger.info("MT5 cloud mode enabled — using MetaAPI.")
+
+# ── Sync mode: in-memory storage for data pushed by local agent ─────
+_sync_data = {
+    "account": None,
+    "positions": [],
+    "closed_trades": [],
+    "last_sync": None,
+    "last_live_update": None,
+    "connected": False,
+}
+_sync_live_subscribers: list[WebSocket] = []  # dashboard clients listening for live updates
 
 # ------------------------------------------------------------------ #
 #  Global services
@@ -114,6 +127,11 @@ async def lifespan(app: FastAPI):
         ok = _mt5_local.connect()
         if ok:
             logger.info("✅ Local MT5 desktop terminal connected successfully.")
+            # mt5.initialize() starts MT5 in the background — bring window to foreground
+            try:
+                _mt5_access._open_mt5()
+            except Exception:
+                pass
         else:
             logger.warning("⚠️ Local MT5 terminal not connected — is MetaTrader 5 running?")
     else:
@@ -670,6 +688,8 @@ def health():
     accounts = db.get_mt5_accounts()
     if MT5_MODE == "local" and _mt5_local:
         mt5_connected = _mt5_local.is_connected
+    elif MT5_MODE == "sync":
+        mt5_connected = _sync_data["connected"]
     else:
         mt5_connected = len(accounts) > 0
     return {
@@ -686,11 +706,17 @@ def health():
 
 @app.post("/api/mt5/reconnect")
 def mt5_reconnect():
-    """Reconnect to the local MT5 desktop terminal."""
+    """Reconnect to the local MT5 desktop terminal and bring window to foreground."""
     if MT5_MODE != "local" or not _mt5_local:
         raise HTTPException(400, "MT5 reconnect only available in local mode")
     _mt5_local.disconnect()
     ok = _mt5_local.connect()
+    # mt5.initialize() starts MT5 in the background — bring the window to foreground
+    if ok:
+        try:
+            _mt5_access._open_mt5()
+        except Exception:
+            pass
     return {"status": "connected" if ok else "failed", "mt5_connected": ok}
 
 
@@ -853,6 +879,7 @@ async def websocket_live(ws: WebSocket, token: str = None):
     await ws.accept()
     logger.info("WebSocket client connected")
     tick = 0
+    full_tick_counter = 0  # increments every time tick==3 fires, used to alternate heavy calls
     global _history_updated_flag
     try:
         while True:
@@ -873,21 +900,34 @@ async def websocket_live(ws: WebSocket, token: str = None):
                     }
 
                     if tick == 3:
-                        # Full tick: add heavy data
+                        # Full tick: heavy data runs off the event loop in a thread pool.
+                        # Alternate between discipline (even full-ticks) and analytics (odd full-ticks)
+                        # so we never fire every heavy call at once.
+                        full_tick_counter += 1
                         try:
-                            snapshot["daily_stats"] = _mt5_local.get_daily_stats()
+                            snapshot["daily_stats"] = await asyncio.to_thread(
+                                _mt5_local.get_daily_stats
+                            )
                         except Exception:
                             pass
                         try:
-                            snapshot["discipline"] = _discipline_local.run_all_checks() if _discipline_local else None
+                            if full_tick_counter % 2 == 0 and _discipline_local:
+                                snapshot["discipline"] = await asyncio.to_thread(
+                                    _discipline_local.run_all_checks
+                                )
                         except Exception:
                             pass
                         try:
-                            snapshot["journal_stats"] = db.get_journal_stats()
+                            snapshot["journal_stats"] = await asyncio.to_thread(
+                                db.get_journal_stats
+                            )
                         except Exception:
                             pass
                         try:
-                            snapshot["analytics"] = db.get_advanced_analytics()
+                            if full_tick_counter % 2 == 1:
+                                snapshot["analytics"] = await asyncio.to_thread(
+                                    db.get_advanced_analytics
+                                )
                         except Exception:
                             pass
                         try:
@@ -895,6 +935,36 @@ async def websocket_live(ws: WebSocket, token: str = None):
                         except Exception:
                             pass
 
+                    await ws.send_json(snapshot)
+                elif MT5_MODE == "sync":
+                    # ── Sync mode: serve cached data from local agent ──
+                    hist_flag = _history_updated_flag
+                    if hist_flag:
+                        _history_updated_flag = False
+                    snapshot = {
+                        "connected": _sync_data["connected"],
+                        "account": _sync_data["account"],
+                        "positions": _sync_data["positions"],
+                        "history_updated": hist_flag,
+                        "timestamp": _sync_data.get("last_live_update") or datetime.now(get_local_tz()).isoformat(),
+                    }
+                    if tick == 3:
+                        try:
+                            snapshot["journal_stats"] = await asyncio.to_thread(
+                                db.get_journal_stats
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            snapshot["analytics"] = await asyncio.to_thread(
+                                db.get_advanced_analytics
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            snapshot["mt5_access"] = _mt5_access.get_status()
+                        except Exception:
+                            pass
                     await ws.send_json(snapshot)
                 else:
                     # ── Cloud mode (MetaAPI) ──
@@ -946,7 +1016,7 @@ async def websocket_live(ws: WebSocket, token: str = None):
             except Exception as e:
                 logger.warning(f"WS error: {e}")
                 await ws.send_json({"connected": False, "positions": [], "account": None, "error": str(e)})
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
     except Exception as e:
@@ -1305,6 +1375,25 @@ async def manual_trade_sync(background_tasks: BackgroundTasks):
 #  AI Analysis
 # ------------------------------------------------------------------ #
 
+@app.get("/api/ai-status")
+def get_ai_status():
+    """Return the active AI providers and availability flags."""
+    return {
+        "analyzer": {
+            "available": ai.is_available,
+            "provider": ai.provider_name,
+            "model": ai.model_name,
+        },
+        "vision": {
+            "available": vision.is_available,
+            "vision_provider": vision.vision_provider,
+            "vision_model": vision._vision_model,
+            "coaching_provider": vision.coaching_provider,
+            "coaching_model": vision._coaching_model,
+        },
+    }
+
+
 async def _process_ai_analysis(today: str, daily_stats: dict, positions: list[dict],
                                 alerts: list[dict], rules: dict, custom_prompt: str,
                                 journal_stats: dict, discipline_report: dict,
@@ -1597,9 +1686,81 @@ def get_settings():
 
 @app.put("/api/settings")
 def update_settings(rules: RulesConfig):
-    settings = rules.model_dump()
-    save_settings(settings)
-    return {"status": "saved", "settings": settings}
+    old_settings = load_settings()
+    new_settings = rules.model_dump()
+    
+    # Check if rules are being loosened
+    is_loosening = False
+    
+    # 1. Daily loss limit increased → more risk allowed
+    if new_settings.get("max_daily_loss_pct", 0) > old_settings.get("max_daily_loss_pct", 0):
+        is_loosening = True
+    # 2. Session loss limit increased → more risk per session
+    if new_settings.get("max_session_loss_pct", 0) > old_settings.get("max_session_loss_pct", 0):
+        is_loosening = True
+    # 3. Max lot size increased → bigger positions = more risk
+    if new_settings.get("max_lot_size", 0) > old_settings.get("max_lot_size", 0):
+        is_loosening = True
+
+    # 4. Allowed trading window widened → more screen time = more temptation
+    old_window = old_settings.get("allowed_trading_window", {})
+    new_window = new_settings.get("allowed_trading_window", {})
+    if old_window.get("enabled") and new_window.get("enabled"):
+        def _to_mins(t):
+            try:
+                parts = t.split(":")
+                return int(parts[0]) * 60 + int(parts[1])
+            except Exception:
+                return 0
+        # Earlier start = wider window = loosening
+        if _to_mins(new_window.get("start", "00:00")) < _to_mins(old_window.get("start", "00:00")):
+            is_loosening = True
+        # Later end = wider window = loosening
+        if _to_mins(new_window.get("end", "23:59")) > _to_mins(old_window.get("end", "23:59")):
+            is_loosening = True
+    # Disabling a previously enabled window = removing a safety net = loosening
+    if old_window.get("enabled") and not new_window.get("enabled"):
+        is_loosening = True
+
+    # 5. Session max_trades increased → more trades allowed = overtrading risk
+    for session_name, old_sess in old_settings.get("sessions", {}).items():
+        new_sess = new_settings.get("sessions", {}).get(session_name, {})
+        if new_sess.get("max_trades", 1) > old_sess.get("max_trades", 1):
+            is_loosening = True
+
+    # 6. Bonus rules added or modified to give more trades → loosening
+    old_bonus = old_settings.get("bonus_rules", [])
+    new_bonus = new_settings.get("bonus_rules", [])
+    if len(new_bonus) > len(old_bonus):
+        is_loosening = True
+    else:
+        # Check if any existing bonus rule increased its bonus amount
+        old_bonus_map = {r.get("id"): r for r in old_bonus}
+        for nb in new_bonus:
+            ob = old_bonus_map.get(nb.get("id"))
+            if ob and nb.get("bonus_trades", 1) > ob.get("bonus_trades", 1):
+                is_loosening = True
+
+    if is_loosening:
+        # Schedule the looser settings for 48 hours later
+        pending = new_settings.copy()
+        # Keep old active settings for now, but store pending
+        settings_to_save = old_settings.copy()
+        settings_to_save["pending_settings"] = pending
+        
+        # Calculate 48-hour lock expiry
+        expiry = datetime.now(timezone.utc) + timedelta(hours=48)
+        settings_to_save["lock_expiry"] = expiry.isoformat()
+        
+        save_settings(settings_to_save)
+        return {"status": "locked", "settings": settings_to_save}
+    else:
+        # Rules were tightened or remained the same, apply immediately
+        # Also clear any pending settings if they exist
+        new_settings.pop("pending_settings", None)
+        new_settings.pop("lock_expiry", None)
+        save_settings(new_settings)
+        return {"status": "saved", "settings": new_settings}
 
 
 # ------------------------------------------------------------------ #
@@ -1607,11 +1768,16 @@ def update_settings(rules: RulesConfig):
 # ------------------------------------------------------------------ #
 
 async def _mt5_access_loop():
-    """Background loop: evaluate MT5 access every 30 seconds."""
+    """Background loop: evaluate MT5 access every 30 seconds.
+    
+    tick() is synchronous and performs expensive OS/MT5 operations (process scan,
+    multiple MT5 API calls). Running it via asyncio.to_thread() keeps the event loop
+    unblocked so WebSocket data delivery and API responses remain instant.
+    """
     await asyncio.sleep(5)  # initial delay for server startup
     while True:
         try:
-            _mt5_access.tick()
+            await asyncio.to_thread(_mt5_access.tick)
         except Exception as e:
             logger.warning(f"MT5 Access Controller error: {e}")
         await asyncio.sleep(30)
@@ -1635,10 +1801,14 @@ def mt5_access_override(body: dict):
 
 @app.post("/api/mt5-access/force-open")
 def mt5_access_force_open():
-    """Emergency override: open MT5, but only during Asian session."""
+    """Emergency override: open MT5 for max 2 extra trades in the current session (once per session)."""
     allowed = _mt5_access.force_open()
     if not allowed:
-        raise HTTPException(403, "Force Open is only allowed during the Asian session (05:30–12:00 IST)")
+        status = _mt5_access.get_status()
+        raise HTTPException(403, {
+            "detail": "Force Open denied — either outside a session or already used in this session today.",
+            "state": status,
+        })
     _mt5_access.tick()
     return {"status": "ok", "action": "force_open", "state": _mt5_access.get_status()}
 
@@ -1656,6 +1826,241 @@ def mt5_access_toggle(body: dict):
     enabled = body.get("enabled", True)
     _mt5_access.set_enabled(enabled)
     return {"status": "ok", "controller_enabled": enabled}
+
+
+# ------------------------------------------------------------------ #
+#  Discipline Loop — Morning Ritual, Pre-Trade Gate, Post-Trade Reflect
+# ------------------------------------------------------------------ #
+
+import threading as _threading
+
+_ritual_store_lock = _threading.Lock()
+
+def _get_today_key() -> str:
+    return datetime.now(get_local_tz()).strftime("%Y-%m-%d")
+
+# In-memory stores (persist to a simple json sidecar file for durability)
+_RITUAL_FILE = Path(__file__).parent / "daily_rituals.json"
+_REFLECTIONS_FILE = Path(__file__).parent / "trade_reflections.json"
+_PRE_TRADE_FILE = Path(__file__).parent / "pre_trade_logs.json"
+
+def _load_json_store(path: Path) -> dict:
+    try:
+        if path.exists():
+            with open(path, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_json_store(path: Path, data: dict):
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+# ── Morning Ritual ─────────────────────────────────────────────────
+
+@app.get("/api/ritual/today")
+def get_today_ritual(user=Depends(extract_user_from_token)):
+    """Check if the morning ritual is completed today."""
+    store = _load_json_store(_RITUAL_FILE)
+    today = _get_today_key()
+    return store.get(today, {"completed": False, "completed_at": None, "intention": "", "rules_confirmed": []})
+
+
+@app.post("/api/ritual/complete")
+def complete_ritual(body: dict, user=Depends(extract_user_from_token)):
+    """Mark the morning ritual as complete.
+    Body: { intention: str, rules_confirmed: list[str] }
+    """
+    store = _load_json_store(_RITUAL_FILE)
+    today = _get_today_key()
+    store[today] = {
+        "completed": True,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "intention": body.get("intention", ""),
+        "rules_confirmed": body.get("rules_confirmed", []),
+        "user": user.get("sub") if user else None,
+    }
+    _save_json_store(_RITUAL_FILE, store)
+    return {"status": "ok", "ritual": store[today]}
+
+
+# ── Pre-Trade Gate ─────────────────────────────────────────────────
+
+@app.post("/api/pre-trade/log")
+def log_pre_trade(body: dict, user=Depends(extract_user_from_token)):
+    """Log a pre-trade checklist completion.
+    Body: { setup: str, stop_level: str, mood: int (1-5), ticket: str? }
+    """
+    store = _load_json_store(_PRE_TRADE_FILE)
+    today = _get_today_key()
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "setup": body.get("setup", ""),
+        "stop_level": body.get("stop_level", ""),
+        "mood": body.get("mood", 3),
+        "mood_flagged": body.get("mood", 3) < 3,
+        "ticket": body.get("ticket"),
+        "user": user.get("sub") if user else None,
+    }
+    if today not in store:
+        store[today] = []
+    store[today].append(entry)
+    _save_json_store(_PRE_TRADE_FILE, store)
+    return {"status": "ok", "entry": entry}
+
+
+@app.get("/api/pre-trade/logs")
+def get_pre_trade_logs(date: str = None, user=Depends(extract_user_from_token)):
+    """Get all pre-trade logs for a date (default: today)."""
+    store = _load_json_store(_PRE_TRADE_FILE)
+    key = date or _get_today_key()
+    return {"date": key, "logs": store.get(key, [])}
+
+
+# ── Post-Trade Reflection ──────────────────────────────────────────
+
+@app.post("/api/reflection/log")
+def log_reflection(body: dict, user=Depends(extract_user_from_token)):
+    """Log a post-trade reflection.
+    Body: { ticket: str, followed_entry: bool, followed_exit: bool, note: str? }
+    """
+    store = _load_json_store(_REFLECTIONS_FILE)
+    today = _get_today_key()
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "ticket": str(body.get("ticket", "")),
+        "followed_entry": body.get("followed_entry", True),
+        "followed_exit": body.get("followed_exit", True),
+        "note": body.get("note", ""),
+        "user": user.get("sub") if user else None,
+    }
+    if today not in store:
+        store[today] = []
+    store[today].append(entry)
+    _save_json_store(_REFLECTIONS_FILE, store)
+
+    # Update discipline score if both plans not followed (log a mild alert)
+    logger.info(f"Post-trade reflection logged for ticket={entry['ticket']} | entry={entry['followed_entry']} exit={entry['followed_exit']}")
+    return {"status": "ok", "entry": entry}
+
+
+@app.get("/api/reflection/logs")
+def get_reflections(date: str = None, user=Depends(extract_user_from_token)):
+    """Get all post-trade reflections for a date (default: today)."""
+    store = _load_json_store(_REFLECTIONS_FILE)
+    key = date or _get_today_key()
+    return {"date": key, "logs": store.get(key, [])}
+
+
+# ------------------------------------------------------------------ #
+#  Sync mode: endpoints for local agent to push data
+# ------------------------------------------------------------------ #
+@app.post("/api/sync/push")
+async def sync_push(payload: dict = Body(...)):
+    """Receive bulk synced data from local MT5 agent."""
+    # Authenticate
+    api_key = payload.get("api_key", "")
+    if not SYNC_API_KEY or api_key != SYNC_API_KEY:
+        raise HTTPException(403, "Invalid sync API key")
+
+    global _history_updated_flag
+
+    # Store account & positions
+    _sync_data["account"] = payload.get("account")
+    _sync_data["positions"] = payload.get("positions", [])
+    _sync_data["connected"] = payload.get("account") is not None
+    _sync_data["last_sync"] = datetime.now(get_local_tz()).isoformat()
+
+    # Process closed trades through existing upsert pipeline
+    closed_trades = payload.get("closed_trades", [])
+    synced_count = 0
+    for trade in closed_trades:
+        pid = trade.get("position_id", 0)
+        # Build the aggregated deal dict that upsert_trade_by_position expects
+        agg = {
+            "position_id": pid,
+            "ticket": trade.get("ticket", 0),
+            "symbol": trade.get("symbol", ""),
+            "type": trade.get("type", ""),
+            "volume": trade.get("volume", 0),
+            "open_price": trade.get("open_price", 0),
+            "close_price": trade.get("close_price", 0),
+            "open_time": trade.get("open_time", ""),
+            "close_time": trade.get("close_time", ""),
+            "profit": trade.get("profit", 0),
+            "commission": trade.get("commission", 0),
+            "swap": trade.get("swap", 0),
+            "sl": trade.get("sl", 0),
+            "tp": trade.get("tp", 0),
+            "duration_minutes": trade.get("duration_minutes", 0),
+            "date": trade.get("close_time", "")[:10] if trade.get("close_time") else "",
+        }
+        result = db.upsert_trade_by_position(pid, agg)
+        if result in ("inserted", "updated"):
+            synced_count += 1
+
+    if synced_count > 0:
+        _history_updated_flag = True
+        _cache_invalidate("journal_stats")
+        _cache_invalidate("analytics")
+        logger.info(f"Sync push: {synced_count} trades synced from local agent")
+
+    return {
+        "status": "ok",
+        "synced_trades": synced_count,
+        "positions_received": len(_sync_data["positions"]),
+    }
+
+
+@app.websocket("/ws/sync/agent")
+async def ws_sync_agent(ws: WebSocket, api_key: str = None):
+    """WebSocket endpoint for local sync agent to push live price/position data."""
+    if not SYNC_API_KEY or api_key != SYNC_API_KEY:
+        await ws.close(code=1008, reason="Invalid sync API key")
+        return
+
+    await ws.accept()
+    logger.info("Local sync agent WebSocket connected")
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            if data.get("type") == "live_update":
+                # Update sync cache with live data
+                _sync_data["account"] = data.get("account")
+                _sync_data["positions"] = data.get("positions", [])
+                _sync_data["connected"] = True
+                _sync_data["last_live_update"] = data.get("timestamp", datetime.now(get_local_tz()).isoformat())
+
+    except WebSocketDisconnect:
+        logger.info("Local sync agent WebSocket disconnected")
+        _sync_data["connected"] = False
+    except Exception as e:
+        logger.warning(f"Sync agent WebSocket error: {e}")
+        _sync_data["connected"] = False
+
+
+@app.get("/api/sync/status")
+async def sync_status():
+    """Check the status of the local sync agent connection."""
+    return {
+        "mode": MT5_MODE,
+        "connected": _sync_data["connected"],
+        "last_sync": _sync_data["last_sync"],
+        "last_live_update": _sync_data["last_live_update"],
+        "positions_count": len(_sync_data["positions"]),
+        "account": _sync_data["account"],
+    }
 
 
 # ------------------------------------------------------------------ #

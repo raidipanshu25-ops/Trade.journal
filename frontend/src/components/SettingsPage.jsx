@@ -207,6 +207,7 @@ export function SettingsPage({ theme, onToggleTheme, currentUser, onLogout, onUs
   const [settings, setSettings] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [timeLeft, setTimeLeft] = useState('');
   const [activePreset, setActivePreset] = useState(() => localStorage.getItem('tj-preset') || 'terminal-teal');
   const [customColor, setCustomColor] = useState(() => localStorage.getItem('tj-custom-base') || '#00D9A3');
   const [contrast, setContrast] = useState(() => parseInt(localStorage.getItem('tj-contrast') || '100', 10));
@@ -227,11 +228,80 @@ export function SettingsPage({ theme, onToggleTheme, currentUser, onLogout, onUs
     api.getSettings().then(setSettings).catch(console.error);
   }, []);
 
+  // 48-Hour Rule Locker Countdown
+  useEffect(() => {
+    if (!settings?.lock_expiry) {
+      setTimeLeft('');
+      return;
+    }
+    const updateCountdown = () => {
+      const expiry = new Date(settings.lock_expiry).getTime();
+      const now = new Date().getTime();
+      const diff = expiry - now;
+      if (diff <= 0) {
+        setTimeLeft('Unlocking on next refresh...');
+      } else {
+        const h = Math.floor(diff / (1000 * 60 * 60));
+        const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        setTimeLeft(`${h}h ${m}m`);
+      }
+    };
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 60000); // update every minute
+    return () => clearInterval(interval);
+  }, [settings?.lock_expiry]);
+
   const handleChange = (key, value) => {
     setSettings(prev => ({ ...prev, [key]: value }));
     setSaved(false);
   };
 
+  const handleAddBonusRule = () => {
+    const newRule = {
+      id: 'rule_' + Date.now(),
+      target_session: 'london',
+      bonus_trades: 1,
+      conditions: [{ type: 'consecutive_wins', lookback_trades: 2, source_session: 'asia' }]
+    };
+    setSettings(prev => ({
+      ...prev,
+      bonus_rules: [...(prev.bonus_rules || []), newRule]
+    }));
+    setSaved(false);
+  };
+
+  const handleUpdateBonusRule = (id, field, value) => {
+    setSettings(prev => ({
+      ...prev,
+      bonus_rules: (prev.bonus_rules || []).map(r => r.id === id ? { ...r, [field]: value } : r)
+    }));
+    setSaved(false);
+  };
+
+  const handleUpdateBonusCondition = (ruleId, field, value) => {
+    setSettings(prev => ({
+      ...prev,
+      bonus_rules: (prev.bonus_rules || []).map(r => {
+        if (r.id === ruleId) {
+          const newConds = [...(r.conditions || [])];
+          if (newConds.length > 0) {
+            newConds[0] = { ...newConds[0], [field]: value };
+          }
+          return { ...r, conditions: newConds };
+        }
+        return r;
+      })
+    }));
+    setSaved(false);
+  };
+
+  const handleDeleteBonusRule = (id) => {
+    setSettings(prev => ({
+      ...prev,
+      bonus_rules: (prev.bonus_rules || []).filter(r => r.id !== id)
+    }));
+    setSaved(false);
+  };
   const handleSessionChange = (session, key, value) => {
     setSettings(prev => ({
       ...prev,
@@ -243,10 +313,55 @@ export function SettingsPage({ theme, onToggleTheme, currentUser, onLogout, onUs
     setSaved(false);
   };
 
+  const handleAddSession = () => {
+    const newSessionName = 'new_session_' + Date.now().toString().slice(-4);
+    setSettings(prev => ({
+      ...prev,
+      sessions: {
+        ...prev.sessions,
+        [newSessionName]: {
+          start: '08:00',
+          end: '16:00',
+          enabled: true,
+          max_trades: 1
+        }
+      }
+    }));
+    setSaved(false);
+  };
+
+  const handleDeleteSession = (sessionName) => {
+    setSettings(prev => {
+      const newSessions = { ...prev.sessions };
+      delete newSessions[sessionName];
+      return { ...prev, sessions: newSessions };
+    });
+    setSaved(false);
+  };
+
+  const handleRenameSession = (oldName, newName) => {
+    if (oldName === newName || !newName.trim()) return;
+    setSettings(prev => {
+      const newSessions = { ...prev.sessions };
+      newSessions[newName] = newSessions[oldName];
+      delete newSessions[oldName];
+      return { ...prev, sessions: newSessions };
+    });
+    setSaved(false);
+  };
+
   const handleSave = async () => {
     setSaving(true);
     try {
-      await api.updateSettings(settings);
+      const result = await api.updateSettings(settings);
+      // The API returns the updated settings, which might contain lock_expiry if it was a looser rule
+      if (result && result.settings) {
+        setSettings(result.settings);
+      } else {
+        // Fallback fetch
+        const updated = await api.getSettings();
+        setSettings(updated);
+      }
       setSaved(true);
     } catch (err) {
       alert('Failed to save: ' + err.message);
@@ -504,16 +619,34 @@ export function SettingsPage({ theme, onToggleTheme, currentUser, onLogout, onUs
       </div>
 
       {/* ══════════════ Trade Settings ══════════════ */}
+      
+      {settings.lock_expiry && (
+        <div style={{
+          background: 'rgba(244, 63, 94, 0.1)',
+          border: '1px solid rgba(244, 63, 94, 0.3)',
+          borderRadius: '8px',
+          padding: '16px',
+          marginBottom: '24px',
+          color: 'var(--text-0)',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '12px'
+        }}>
+          <span style={{ fontSize: '1.2rem' }}>🔒</span>
+          <div>
+            <h4 style={{ margin: '0 0 6px 0', color: '#F43F5E', fontSize: '0.95rem' }}>48-Hour Rule Locker Active</h4>
+            <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-1)', lineHeight: 1.5 }}>
+              You recently attempted to loosen your trading rules (e.g. increasing risk limits or max trades). 
+              To protect you from emotional decision-making, these looser rules are pending and will unlock in <strong>{timeLeft}</strong>.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="content-grid">
         {/* Trade Limits */}
         <div className="card">
           <div className="settings-section-title">Trade Limits</div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-2)', marginBottom: '16px', lineHeight: 1.6 }}>
-            <strong style={{ color: 'var(--text-1)' }}>Strict Bonus Limits Active:</strong><br/>
-            • Asia: Base 1 trade (Bonus 2nd trade if Asia Net P&L over last 2 days is profitable)<br/>
-            • London: Base 1 trade (Bonus 2nd trade if all today's previous trades are profitable)<br/>
-            • New York: Max 1 trade
-          </div>
           <div className="form-group">
             <label className="form-label">Max Lot Size</label>
             <input type="number" step="0.01" className="form-input" value={settings.max_lot_size}
@@ -538,21 +671,83 @@ export function SettingsPage({ theme, onToggleTheme, currentUser, onLogout, onUs
 
         {/* Session Windows */}
         <div className="card content-grid-full">
-          <div className="settings-section-title">Trading Sessions</div>
+          <div className="settings-section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Trading Sessions</span>
+            <button className="btn-secondary" onClick={handleAddSession} style={{ padding: '4px 10px', fontSize: '0.8rem' }}>+ Add Session</button>
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '12px' }}>
             {Object.entries(settings.sessions || {}).map(([name, session]) => (
               <div key={name} className={`session-card ${session.enabled ? 'enabled' : ''}`}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                  <span style={{ fontWeight: 600, textTransform: 'capitalize', fontSize: '0.88rem', color: 'var(--text-0)' }}>{name}</span>
-                  <label className="toggle-switch">
-                    <input type="checkbox" checked={session.enabled} onChange={e => handleSessionChange(name, 'enabled', e.target.checked)} />
-                    <span className="toggle-slider" />
-                  </label>
+                  <input 
+                    key={name}
+                    type="text" 
+                    defaultValue={name} 
+                    onBlur={(e) => handleRenameSession(name, e.target.value.trim().toLowerCase().replace(/\s+/g, '_'))}
+                    placeholder="session name"
+                    style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-0)', background: 'transparent', border: '1px dashed rgba(255,255,255,0.15)', padding: '2px 6px', borderRadius: '4px', width: '130px', outline: 'none' }} 
+                  />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <label className="toggle-switch">
+                      <input type="checkbox" checked={session.enabled} onChange={e => handleSessionChange(name, 'enabled', e.target.checked)} />
+                      <span className="toggle-slider" />
+                    </label>
+                    <button className="btn-secondary" onClick={() => handleDeleteSession(name)} style={{ padding: '2px 8px', fontSize: '0.75rem', background: 'rgba(244, 63, 94, 0.1)', color: '#F43F5E', border: 'none' }}>Remove</button>
+                  </div>
                 </div>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                   <input type="time" className="form-input" style={{ flex: 1 }} value={session.start} onChange={e => handleSessionChange(name, 'start', e.target.value)} />
                   <span style={{ color: 'var(--text-3)', fontSize: '0.8rem' }}>→</span>
                   <input type="time" className="form-input" style={{ flex: 1 }} value={session.end} onChange={e => handleSessionChange(name, 'end', e.target.value)} />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
+                  <label className="form-label" style={{ margin: 0, fontSize: '0.8rem' }}>Max Trades:</label>
+                  <input type="number" min="0" step="1" className="form-input" style={{ width: '60px', padding: '4px 8px' }} value={session.max_trades ?? 1} onChange={e => handleSessionChange(name, 'max_trades', parseInt(e.target.value) || 0)} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Floating / Bonus Trades */}
+        <div className="card content-grid-full">
+          <div className="settings-section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Floating / Bonus Trades</span>
+            <button className="btn-secondary" onClick={handleAddBonusRule} style={{ padding: '4px 10px', fontSize: '0.8rem' }}>+ Add Rule</button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {(settings.bonus_rules || []).length === 0 ? (
+              <p style={{ color: 'var(--text-3)', fontSize: '0.85rem', margin: 0, fontStyle: 'italic' }}>No floating trade rules configured.</p>
+            ) : (settings.bonus_rules || []).map((rule, idx) => (
+              <div key={rule.id} className="session-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 700, fontSize: '0.88rem', color: 'var(--cyan)' }}>✦ Bonus Rule {idx + 1}</span>
+                  <button className="btn-secondary" onClick={() => handleDeleteBonusRule(rule.id)} style={{ padding: '2px 8px', fontSize: '0.75rem', background: 'rgba(244, 63, 94, 0.1)', color: '#F43F5E', border: 'none' }}>Remove</button>
+                </div>
+                
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', fontSize: '0.85rem', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', padding: '10px 12px', borderRadius: '6px' }}>
+                  <span style={{ color: 'var(--text-2)' }}>If my last</span>
+                  <input type="number" min="1" step="1" className="form-input" style={{ width: '52px', padding: '4px 6px', textAlign: 'center' }} 
+                    value={rule.conditions?.[0]?.lookback_trades ?? 1} 
+                    onChange={e => handleUpdateBonusCondition(rule.id, 'lookback_trades', parseInt(e.target.value) || 1)} />
+                  <span style={{ color: 'var(--text-2)' }}>trades in</span>
+                  <select className="form-input" style={{ width: '120px', padding: '4px 6px', textTransform: 'capitalize' }} 
+                    value={rule.conditions?.[0]?.source_session ?? 'all'}
+                    onChange={e => handleUpdateBonusCondition(rule.id, 'source_session', e.target.value)}>
+                    <option value="all">Any Session</option>
+                    {Object.keys(settings.sessions || {}).map(s => <option key={s} value={s} style={{ textTransform: 'capitalize' }}>{s}</option>)}
+                  </select>
+                  <span style={{ color: 'var(--cyan)', fontWeight: 600 }}>are profitable →</span>
+                  <span style={{ color: 'var(--text-2)' }}>add</span>
+                  <input type="number" min="1" step="1" className="form-input" style={{ width: '52px', padding: '4px 6px', textAlign: 'center' }} 
+                    value={rule.bonus_trades ?? 1} 
+                    onChange={e => handleUpdateBonusRule(rule.id, 'bonus_trades', parseInt(e.target.value) || 1)} />
+                  <span style={{ color: 'var(--text-2)' }}>extra trade(s) to</span>
+                  <select className="form-input" style={{ width: '120px', padding: '4px 6px', textTransform: 'capitalize' }} 
+                    value={rule.target_session ?? ''}
+                    onChange={e => handleUpdateBonusRule(rule.id, 'target_session', e.target.value)}>
+                    {Object.keys(settings.sessions || {}).map(s => <option key={s} value={s} style={{ textTransform: 'capitalize' }}>{s}</option>)}
+                  </select>
                 </div>
               </div>
             ))}
