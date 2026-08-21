@@ -637,7 +637,7 @@ class MT5AccessController:
         return {
             **self._state,
             "mt5_process_running": self._is_mt5_running(),
-            "mt5_exe_found": bool(self._mt5_exe_path),
+            "mt5_exe_found": bool(self._mt5_exe_path) or os.getenv("MT5_MODE") == "sync",
             "mt5_exe_path": self._mt5_exe_path or "",
             "controller_enabled": self._enabled,
             "current_time": now.strftime("%H:%M:%S IST"),
