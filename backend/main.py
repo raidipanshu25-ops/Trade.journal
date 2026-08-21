@@ -304,7 +304,7 @@ async def check_auth_middleware(request: Request, call_next):
         return await call_next(request)
     
     path = request.url.path
-    public_paths = ["/api/auth/login", "/api/auth/google", "/api/auth/register", "/api/health"]
+    public_paths = ["/api/auth/login", "/api/auth/google", "/api/auth/register", "/api/health", "/api/config"]
     
     if path.startswith("/api/") and path not in public_paths:
         if path.startswith("/api/chart/image/"):
@@ -686,6 +686,18 @@ def admin_delete_user(user_id: int, request: Request):
 # ------------------------------------------------------------------ #
 #  Health / Connection
 # ------------------------------------------------------------------ #
+@app.get("/api/config")
+def public_config():
+    """Public config — returns non-secret settings for the frontend.
+    This allows anyone to deploy without rebuilding the frontend."""
+    return {
+        "google_client_id": GOOGLE_CLIENT_ID or "",
+        "mt5_mode": MT5_MODE,
+        "allow_registration": ALLOW_REGISTRATION,
+        "google_sso_enabled": bool(GOOGLE_CLIENT_ID),
+    }
+
+
 @app.get("/api/health")
 def health():
     accounts = db.get_mt5_accounts()
