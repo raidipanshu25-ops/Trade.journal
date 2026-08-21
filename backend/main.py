@@ -8,6 +8,7 @@ Serves the dashboard frontend and exposes REST APIs for:
 - Settings management
 """
 import logging
+import os
 import asyncio
 import json
 import time
