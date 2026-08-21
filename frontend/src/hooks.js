@@ -69,7 +69,8 @@ export function useLiveData() {
     const poll = async () => {
       if (!mountedRef.current) return;
       try {
-        const res = await fetch('/api/positions-live');
+        const base = import.meta.env.VITE_API_URL || '';
+        const res = await fetch(`${base}/api/positions-live`);
         if (res.ok) {
           const data = await res.json();
           if (mountedRef.current) {
@@ -91,9 +92,17 @@ export function useLiveData() {
     if (!mountedRef.current) return;
 
     try {
-      const proto  = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const token  = localStorage.getItem('tj-auth-token') || '';
-      const wsUrl  = `${proto}//${window.location.host}/ws/live?token=${token}`;
+      let wsUrl;
+      if (import.meta.env.VITE_API_URL) {
+        const backendUrl = import.meta.env.VITE_API_URL;
+        const wsProto = backendUrl.startsWith('https') ? 'wss:' : 'ws:';
+        const wsHost = backendUrl.replace(/^https?:\/\//, '');
+        wsUrl = `${wsProto}//${wsHost}/ws/live?token=${token}`;
+      } else {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${proto}//${window.location.host}/ws/live?token=${token}`;
+      }
 
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;

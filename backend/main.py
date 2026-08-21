@@ -283,11 +283,13 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 #   http(s)://172.16-31.x.x:<port> (docker / VPN ranges)
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=[origin for origin in [os.getenv("FRONTEND_URL", "")] if origin],
     allow_origin_regex=(
         r"https?://(localhost|127\.0\.0\.1"
         r"|192\.168\.\d{1,3}\.\d{1,3}"
         r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
         r"|172\.(1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}"
+        r"|[a-z0-9-]+\.onrender\.com"
         r")(:\d{1,5})?"
     ),
     allow_methods=["*"],
