@@ -80,7 +80,7 @@ export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip })
   return (
     <>
       <style>
-        {\`
+        {`
           @keyframes fadeSlideUp {
             from { opacity: 0; transform: translateY(15px); }
             to { opacity: 1; transform: translateY(0); }
@@ -90,7 +90,7 @@ export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip })
             70% { box-shadow: 0 0 0 15px transparent; }
             100% { box-shadow: 0 0 0 0 transparent; }
           }
-        \`}
+        `}
       </style>
       <div style={containerStyle}>
         {step === 1 && (

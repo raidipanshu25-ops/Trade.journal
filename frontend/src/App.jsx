@@ -10,6 +10,7 @@ import { LoginPage } from './components/LoginPage';
 import { MorningRitual } from './components/MorningRitual';
 import { PreTradeGate } from './components/PreTradeGate';
 import { PostTradeReflection } from './components/PostTradeReflection';
+import { ConnectorStatus } from './components/ConnectorStatus';
 
 // applyThemePreset is a pure function (no JSX) — import it directly
 // so SettingsPage.jsx can remain fully lazy-loaded.
@@ -28,6 +29,7 @@ const AccountAnalysis = lazy(() => import('./components/AccountAnalysis').then(m
 const MT5AccountsPage = lazy(() => import('./components/MT5AccountsPage').then(m => ({ default: m.MT5AccountsPage })));
 const AdminPage       = lazy(() => import('./components/AdminPage').then(m => ({ default: m.AdminPage })));
 const MT5AccessPanel  = lazy(() => import('./components/MT5AccessPanel').then(m => ({ default: m.MT5AccessPanel })));
+const OnboardingWizard = lazy(() => import('./components/OnboardingWizard').then(m => ({ default: m.OnboardingWizard })));
 
 // Fallback shown while a lazy chunk is loading
 function PageLoader() {
@@ -124,6 +126,31 @@ function App() {
     api.getSettings().then(s => setRitualSettings(s)).catch(() => {});
   }, [isAuthenticated]);
 
+  // ── Onboarding / MT5 Connector state ──────────────────────────────
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(
+    () => localStorage.getItem('tj-onboarding-dismissed') === 'true'
+  );
+  const [syncToken, setSyncToken] = useState('');
+  const [syncStatus, setSyncStatus] = useState({ connected: false, last_sync: null });
+  const [appConfig, setAppConfig] = useState({});
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    // Fetch config, sync token, and sync status
+    api.getConfig().then(setAppConfig).catch(() => {});
+    api.getSyncToken().then(data => {
+      setSyncToken(data.sync_token || '');
+      // If no sync token and no trades, show onboarding
+      if (!data.has_token && !onboardingDismissed) {
+        setShowOnboarding(true);
+      }
+    }).catch(() => {});
+    api.getSyncStatus().then(data => {
+      setSyncStatus(data);
+    }).catch(() => {});
+  }, [isAuthenticated, onboardingDismissed]);
+
   // ── Pre-Trade Gate ────────────────────────────────────────────────
   const [preTradeGateOpen, setPreTradeGateOpen] = useState(false);
   const preTradeCallbackRef = useRef(null);
@@ -207,6 +234,27 @@ function App() {
 
   if (ritualRequired) {
     return <MorningRitual settings={ritualSettings} onComplete={() => setRitualRequired(false)} />;
+  }
+
+  if (showOnboarding && !onboardingDismissed && appConfig.mt5_mode === 'sync') {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <OnboardingWizard
+          syncToken={syncToken}
+          isConnected={syncStatus.connected}
+          onComplete={() => {
+            setShowOnboarding(false);
+            localStorage.setItem('tj-onboarding-dismissed', 'true');
+            setOnboardingDismissed(true);
+          }}
+          onSkip={() => {
+            setShowOnboarding(false);
+            localStorage.setItem('tj-onboarding-dismissed', 'true');
+            setOnboardingDismissed(true);
+          }}
+        />
+      </Suspense>
+    );
   }
 
   return (
@@ -296,6 +344,17 @@ function App() {
             <div className="page-header">
               <h2>Dashboard</h2>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                {appConfig.mt5_mode === 'sync' && (
+                  <ConnectorStatus
+                    connected={syncStatus.connected}
+                    lastSync={syncStatus.last_sync}
+                    onSetupClick={() => {
+                      setOnboardingDismissed(false);
+                      localStorage.removeItem('tj-onboarding-dismissed');
+                      setShowOnboarding(true);
+                    }}
+                  />
+                )}
                 <p>Live MT5 positions and trading performance.</p>
                 <div className={`ws-indicator ${live.wsStatus}`} title={`WebSocket: ${live.wsStatus}`}>
                   <span className="ws-dot" />

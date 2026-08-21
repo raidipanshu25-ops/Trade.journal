@@ -228,7 +228,7 @@ async def _background_sync_loop():
                             except Exception as e:
                                 logger.debug(f"Cross-day IN deal lookup failed for pid={pid}: {e}")
 
-                        result = db.upsert_trade_by_position(pid, agg)
+                        result = db.upsert_trade_by_position(pid, agg, user_id=1)
                         if result in ("inserted", "updated"):
                             synced_count += 1
                     if synced_count > 0:
@@ -251,7 +251,7 @@ async def _background_sync_loop():
                         try:
                             closed = await ma.sync_all_history(acc["metaapi_account_id"], days_back=3)
                             for deal in closed:
-                                db.upsert_trade_by_position(deal.get("position_id", 0), deal)
+                                db.upsert_trade_by_position(deal.get("position_id", 0), deal, user_id=1)
                         except Exception as e:
                             logger.debug(f"Background sync error for account {acc['id']}: {e}")
         except Exception as e:
@@ -697,7 +697,8 @@ def health():
     if MT5_MODE == "local" and _mt5_local:
         mt5_connected = _mt5_local.is_connected
     elif MT5_MODE == "sync":
-        mt5_connected = _sync_data["connected"]
+        # Health check: report connected if any user has a connected agent
+        mt5_connected = any(ud.get("connected", False) for ud in _sync_data.values()) if _sync_data else False
     else:
         mt5_connected = len(accounts) > 0
     return {
@@ -716,7 +717,8 @@ def health():
 def mt5_reconnect():
     """Reconnect to the local MT5 desktop terminal and bring window to foreground."""
     if MT5_MODE == "sync":
-        return {"status": "sync_mode", "mt5_connected": _sync_data["connected"],
+        any_connected = any(ud.get("connected", False) for ud in _sync_data.values()) if _sync_data else False
+        return {"status": "sync_mode", "mt5_connected": any_connected,
                 "detail": "In sync mode — connection managed by local agent"}
     if MT5_MODE != "local" or not _mt5_local:
         raise HTTPException(400, "MT5 reconnect only available in local mode")
@@ -883,12 +885,14 @@ async def sync_mt5_account(account_id: int, background_tasks: BackgroundTasks):
 @app.websocket("/ws/live")
 async def websocket_live(ws: WebSocket, token: str = None):
     """Push live data every ~3 seconds."""
-    if not verify_ws_token(token):
+    ws_user = verify_ws_token(token)
+    if not ws_user:
         await ws.close(code=1008, reason="Unauthorized")
         return
+    ws_user_id = ws_user.get("user_id", 0)
 
     await ws.accept()
-    logger.info("WebSocket client connected")
+    logger.info(f"WebSocket client connected (user_id={ws_user_id})")
     tick = 0
     full_tick_counter = 0  # increments every time tick==3 fires, used to alternate heavy calls
     global _history_updated_flag
@@ -930,14 +934,14 @@ async def websocket_live(ws: WebSocket, token: str = None):
                             pass
                         try:
                             snapshot["journal_stats"] = await asyncio.to_thread(
-                                db.get_journal_stats
+                                db.get_journal_stats, user_id=ws_user_id
                             )
                         except Exception:
                             pass
                         try:
                             if full_tick_counter % 2 == 1:
                                 snapshot["analytics"] = await asyncio.to_thread(
-                                    db.get_advanced_analytics
+                                    db.get_advanced_analytics, user_id=ws_user_id
                                 )
                         except Exception:
                             pass
@@ -948,27 +952,28 @@ async def websocket_live(ws: WebSocket, token: str = None):
 
                     await ws.send_json(snapshot)
                 elif MT5_MODE == "sync":
-                    # ── Sync mode: serve cached data from local agent ──
+                    # ── Sync mode: serve cached data from local agent (per-user) ──
+                    user_sync = _get_user_sync_data(ws_user_id)
                     hist_flag = _history_updated_flag
                     if hist_flag:
                         _history_updated_flag = False
                     snapshot = {
-                        "connected": _sync_data["connected"],
-                        "account": _sync_data["account"],
-                        "positions": _sync_data["positions"],
+                        "connected": user_sync["connected"],
+                        "account": user_sync["account"],
+                        "positions": user_sync["positions"],
                         "history_updated": hist_flag,
-                        "timestamp": _sync_data.get("last_live_update") or datetime.now(get_local_tz()).isoformat(),
+                        "timestamp": user_sync.get("last_live_update") or datetime.now(get_local_tz()).isoformat(),
                     }
                     if tick == 3:
                         try:
                             snapshot["journal_stats"] = await asyncio.to_thread(
-                                db.get_journal_stats
+                                db.get_journal_stats, user_id=ws_user_id
                             )
                         except Exception:
                             pass
                         try:
                             snapshot["analytics"] = await asyncio.to_thread(
-                                db.get_advanced_analytics
+                                db.get_advanced_analytics, user_id=ws_user_id
                             )
                         except Exception:
                             pass
@@ -1011,11 +1016,11 @@ async def websocket_live(ws: WebSocket, token: str = None):
 
                         if tick == 3:
                             try:
-                                snapshot["journal_stats"] = db.get_journal_stats()
+                                snapshot["journal_stats"] = db.get_journal_stats(user_id=ws_user_id)
                             except Exception:
                                 pass
                             try:
-                                snapshot["analytics"] = db.get_advanced_analytics()
+                                snapshot["analytics"] = db.get_advanced_analytics(user_id=ws_user_id)
                             except Exception:
                                 pass
                             try:
@@ -1110,15 +1115,16 @@ async def get_today_deals():
 #  Discipline check
 # ------------------------------------------------------------------ #
 @app.get("/api/discipline/check")
-def run_discipline_check():
+def run_discipline_check(user=Depends(extract_user_from_token)):
     """Run discipline checks — live checks in local mode, DB-based in cloud mode."""
+    user_id = user.get("user_id", 0) if user else 0
     today = datetime.now(get_local_tz()).strftime("%Y-%m-%d")
 
     # In local mode: use full live discipline checker with real MT5 data
     if MT5_MODE == "local" and _discipline_local and _mt5_local and _mt5_local.is_connected:
         report = _discipline_local.run_all_checks()
         if report.get("alerts"):
-            db.save_alerts(report["alerts"], today)
+            db.save_alerts(report["alerts"], today, user_id=user_id)
         # Also save daily snapshot
         try:
             stats = _mt5_local.get_daily_stats()
@@ -1126,13 +1132,13 @@ def run_discipline_check():
                 "net_pnl": stats.get("net_pnl", 0),
                 "total_trades": stats.get("total_trades", 0),
                 "wins": stats.get("winning_trades", 0),
-            }, report.get("score", 100), report.get("total_violations", 0))
+            }, report.get("score", 100), report.get("total_violations", 0), user_id=user_id)
         except Exception:
             pass
         return report
 
     # Cloud / fallback: DB-based discipline check
-    trades = db.get_trade_history(date=today)
+    trades = db.get_trade_history(date=today, user_id=user_id)
     settings = load_settings()
     alerts = []
     rules = settings.get("rules", {})
@@ -1149,15 +1155,16 @@ def run_discipline_check():
     score = max(0, 100 - len(alerts) * 15)
     report = {"score": score, "alerts": alerts, "total_violations": len(alerts)}
     if alerts:
-        db.save_alerts(alerts, today)
-    db.save_daily_snapshot(today, {"net_pnl": daily_pnl, "total_trades": total, "wins": wins}, score, len(alerts))
+        db.save_alerts(alerts, today, user_id=user_id)
+    db.save_daily_snapshot(today, {"net_pnl": daily_pnl, "total_trades": total, "wins": wins}, score, len(alerts), user_id=user_id)
     return report
 
 
 @app.get("/api/discipline/alerts")
-def get_alerts(date: str = None, limit: int = 50):
+def get_alerts(date: str = None, limit: int = 50, user=Depends(extract_user_from_token)):
     """Get stored alerts."""
-    return db.get_alerts(date=date, limit=limit)
+    user_id = user.get("user_id", 0) if user else 0
+    return db.get_alerts(date=date, limit=limit, user_id=user_id)
 
 
 # ------------------------------------------------------------------ #
@@ -1357,13 +1364,13 @@ async def manual_trade_sync(background_tasks: BackgroundTasks):
                         agg["duration_minutes"] = (out_t - in_t).total_seconds() / 60.0
                     except Exception:
                         agg["duration_minutes"] = 0.0
-                r = db.upsert_trade_by_position(pid, agg)
+                r = db.upsert_trade_by_position(pid, agg, user_id=1)
                 if r in ("inserted", "updated"):
                     synced += 1
             logger.info(f"Local MT5 sync: {synced} trades processed")
 
         background_tasks.add_task(_sync_local)
-        count = len(db.get_trade_history(date=datetime.now(get_local_tz()).strftime("%Y-%m-%d")))
+        count = len(db.get_trade_history(date=datetime.now(get_local_tz()).strftime("%Y-%m-%d"), user_id=1))
         return {"status": "syncing", "trades_today": count}
 
     # Cloud mode
@@ -1378,13 +1385,13 @@ async def manual_trade_sync(background_tasks: BackgroundTasks):
                 continue
             closed = await ma.sync_all_history(acc["metaapi_account_id"], days_back=3650)
             for deal in closed:
-                r = db.upsert_trade_by_position(deal.get("position_id", 0), deal)
+                r = db.upsert_trade_by_position(deal.get("position_id", 0), deal, user_id=1)
                 if r in ("inserted", "updated"):
                     total += 1
         logger.info(f"Manual full sync: {total} trades processed")
 
     background_tasks.add_task(_sync_all)
-    count = len(db.get_trade_history(date=datetime.now(get_local_tz()).strftime("%Y-%m-%d")))
+    count = len(db.get_trade_history(date=datetime.now(get_local_tz()).strftime("%Y-%m-%d"), user_id=1))
     return {"status": "syncing", "trades_today": count}
 
 
@@ -1416,7 +1423,8 @@ async def _process_ai_analysis(today: str, daily_stats: dict, positions: list[di
                                 journal_stats: dict, discipline_report: dict,
                                 chart_snapshots: list[dict] = None,
                                 today_trades_from_db: list[dict] = None,
-                                advanced_analytics: dict = None):
+                                advanced_analytics: dict = None,
+                                analysis_user_id: int = 0):
     """Background task to run the AI analysis and save to DB."""
     try:
         analysis = await ai.analyze_trades(
@@ -1431,16 +1439,19 @@ async def _process_ai_analysis(today: str, daily_stats: dict, positions: list[di
             today_trades_from_db=today_trades_from_db,
             advanced_analytics=advanced_analytics,
         )
-        db.save_ai_analysis(today, analysis, daily_stats)
+        db.save_ai_analysis(today, analysis, daily_stats, user_id=analysis_user_id)
         logger.info(f"AI analysis completed and saved for {today}")
     except Exception as e:
         error_msg = f"AI analysis failed: {e}"
         logger.error(error_msg)
-        db.save_ai_analysis(today, f"## ⚠️ Analysis Error\n\n{error_msg}\n\nPlease try again.", daily_stats)
+        db.save_ai_analysis(today, f"## ⚠️ Analysis Error\n\n{error_msg}\n\nPlease try again.", daily_stats, user_id=analysis_user_id)
 
 @app.post("/api/analysis")
-async def run_ai_analysis(background_tasks: BackgroundTasks, req: AIAnalysisRequest = None):
+async def run_ai_analysis(background_tasks: BackgroundTasks,
+                          req: AIAnalysisRequest = None,
+                          user=Depends(extract_user_from_token)):
     """Trigger Kimi 2.5 AI analysis for the day's trades in the background."""
+    user_id = user.get("user_id", 0) if user else 0
     if req is None:
         req = AIAnalysisRequest()
 
@@ -1469,14 +1480,14 @@ async def run_ai_analysis(background_tasks: BackgroundTasks, req: AIAnalysisRequ
                 logger.warning(f"AI analysis: failed to fetch live data: {e}")
 
     rules = load_settings()
-    journal_stats = db.get_journal_stats()
+    journal_stats = db.get_journal_stats(user_id=user_id)
     chart_snapshots = db.get_chart_snapshots_for_rag(limit=10)
 
     # Get today's trades from persistent DB (more reliable than MT5 deal window)
-    today_trades_from_db = db.get_trade_history(date=today, limit=200)
+    today_trades_from_db = db.get_trade_history(date=today, limit=200, user_id=user_id)
 
     # Build a discipline report from DB data
-    alerts = db.get_alerts(date=today)
+    alerts = db.get_alerts(date=today, user_id=user_id)
     report = {
         "score": max(0, 100 - len(alerts) * 15),
         "alerts": alerts,
@@ -1500,7 +1511,7 @@ async def run_ai_analysis(background_tasks: BackgroundTasks, req: AIAnalysisRequ
         daily_stats["total_loss"] = round(sum(t["profit"] for t in db_losses), 2)
 
     # Fetch advanced analytics to give AI coach more data
-    advanced_analytics = db.get_advanced_analytics()
+    advanced_analytics = db.get_advanced_analytics(user_id=user_id)
 
     background_tasks.add_task(
         _process_ai_analysis,
@@ -1515,18 +1526,20 @@ async def run_ai_analysis(background_tasks: BackgroundTasks, req: AIAnalysisRequ
         chart_snapshots,
         today_trades_from_db,
         advanced_analytics,
+        analysis_user_id=user_id,
     )
 
     return {"date": today, "status": "started", "message": "Analysis running in background..."}
 
 
 @app.get("/api/analysis/history")
-def get_analysis_history(date: str = None):
+def get_analysis_history(date: str = None, user=Depends(extract_user_from_token)):
     """Get stored AI analyses."""
+    user_id = user.get("user_id", 0) if user else 0
     if date:
-        result = db.get_ai_analysis(date)
+        result = db.get_ai_analysis(date, user_id=user_id)
         return result if result else {"message": "No analysis found for this date"}
-    return db.get_history(30)
+    return db.get_history(30, user_id=user_id)
 
 
 # ------------------------------------------------------------------ #
@@ -1534,10 +1547,12 @@ def get_analysis_history(date: str = None):
 # ------------------------------------------------------------------ #
 
 @app.post("/api/chart/upload")
-async def upload_chart(background_tasks: BackgroundTasks, body: dict = {}):
+async def upload_chart(background_tasks: BackgroundTasks, body: dict = {},
+                       user=Depends(extract_user_from_token)):
     """Upload a chart screenshot (base64) and optionally trigger analysis."""
     import hashlib
     import base64
+    user_id = user.get("user_id", 0) if user else 0
 
     image_data = body.get("image", "")
     if not image_data:
@@ -1556,7 +1571,7 @@ async def upload_chart(background_tasks: BackgroundTasks, body: dict = {}):
     image_hash = hashlib.sha256(image_bytes).hexdigest()[:16]
 
     # Check for duplicate
-    existing = db.get_chart_snapshots()
+    existing = db.get_chart_snapshots(user_id=user_id)
     for snap in existing:
         if snap.get("image_hash") == image_hash:
             return {"status": "duplicate", "id": snap["id"], "message": "This chart was already captured"}
@@ -1577,7 +1592,7 @@ async def upload_chart(background_tasks: BackgroundTasks, body: dict = {}):
         "symbol": body.get("symbol", ""),
         "timeframe": body.get("timeframe", ""),
         "linked_ticket": body.get("linked_ticket", 0),
-    })
+    }, user_id=user_id)
 
     # Auto-trigger analysis if vision AI is available
     if body.get("auto_analyze", True) and vision.is_available:
@@ -1615,9 +1630,11 @@ async def _process_chart_analysis(snapshot_id: int, image_base64: str,
 
 @app.get("/api/chart/snapshots")
 def get_chart_snapshots(date: str = None, symbol: str = None,
-                       limit: int = 50, offset: int = 0):
+                       limit: int = 50, offset: int = 0,
+                       user=Depends(extract_user_from_token)):
     """List chart snapshots with optional filters."""
-    snapshots = db.get_chart_snapshots(date=date, symbol=symbol, limit=limit, offset=offset)
+    user_id = user.get("user_id", 0) if user else 0
+    snapshots = db.get_chart_snapshots(date=date, symbol=symbol, limit=limit, offset=offset, user_id=user_id)
     # Add image URL for frontend
     for s in snapshots:
         if s.get("image_path"):
@@ -1669,9 +1686,11 @@ def serve_chart_image(filename: str):
 
 
 @app.get("/api/chart/export")
-def export_chart_data(start_date: str = None, end_date: str = None):
+def export_chart_data(start_date: str = None, end_date: str = None,
+                      user=Depends(extract_user_from_token)):
     """Export chart snapshots + trade outcomes as JSON training data."""
-    data = db.export_training_data(start_date=start_date, end_date=end_date)
+    user_id = user.get("user_id", 0) if user else 0
+    data = db.export_training_data(start_date=start_date, end_date=end_date, user_id=user_id)
     return JSONResponse(
         content=data,
         headers={"Content-Disposition": f"attachment; filename=chart_training_data_{datetime.now().strftime('%Y%m%d')}.json"}

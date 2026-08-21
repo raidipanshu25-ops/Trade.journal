@@ -48,17 +48,22 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(secu
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-def verify_ws_token(token: str) -> bool:
-    """Helper to check the JWT token for WebSocket connections."""
+def verify_ws_token(token: str) -> dict | None:
+    """Check the JWT token for WebSocket connections.
+
+    Returns the decoded payload dict on success (truthy) or None on failure
+    (falsy), so existing ``if verify_ws_token(token)`` checks keep working
+    while callers that need the user_id can read it from the return value.
+    """
     if not ADMIN_PASSWORD:
-        return True
+        return {"sub": "anonymous", "user_id": 0, "role": "user"}
     if not token:
-        return False
+        return None
     try:
-        jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return True
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
     except jwt.InvalidTokenError:
-        return False
+        return None
 
 # ------------------------------------------------------------------ #
 #  Password Hashing (Native PBKDF2)

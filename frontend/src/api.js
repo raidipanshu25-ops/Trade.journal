@@ -195,4 +195,12 @@ export const api = {
   // Post-Trade Reflection
   logReflection: (body) => apiFetch('/reflection/log', { method: 'POST', body: JSON.stringify(body) }),
   getReflections: (date) => apiFetch(`/reflection/logs${date ? `?date=${date}` : ''}`),
+
+  // MT5 Connector / Sync Token
+  getSyncToken: () => apiFetch('/user/sync-token'),
+  generateSyncToken: () => apiFetch('/user/sync-token', { method: 'POST' }),
+  getSyncStatus: () => apiFetch('/sync/status'),
+
+  // Public config
+  getConfig: () => apiFetch('/config'),
 };

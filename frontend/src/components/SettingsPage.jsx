@@ -203,6 +203,119 @@ export function applyTextPreset() { /* no-op — handled by data-theme */ }
    SettingsPage Component
    ════════════════════════════════════════════════ */
 
+/* ════════════════════════════════════════════════
+   MT5 Connector — Sync Token Management
+   ════════════════════════════════════════════════ */
+function ConnectorTokenSection() {
+  const [token, setToken] = useState('');
+  const [hasToken, setHasToken] = useState(false);
+  const [showToken, setShowToken] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    api.getSyncToken().then(d => { setToken(d.sync_token || ''); setHasToken(d.has_token); }).catch(() => {});
+    api.getSyncStatus().then(setStatus).catch(() => {});
+  }, []);
+
+  const handleCopy = () => {
+    if (token) {
+      navigator.clipboard.writeText(token);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleRegenerate = async () => {
+    setRegenerating(true);
+    try {
+      const d = await api.generateSyncToken();
+      setToken(d.sync_token);
+      setHasToken(true);
+    } catch { /* silent */ }
+    setRegenerating(false);
+  };
+
+  const masked = token ? token.slice(0, 8) + '••••••••' + token.slice(-4) : '—';
+
+  return (
+    <div className="card" style={{ marginBottom: '28px' }}>
+      <div className="settings-section-title">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '6px', verticalAlign: 'text-bottom' }}>
+          <rect x="2" y="2" width="20" height="8" rx="2" ry="2" />
+          <rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
+          <line x1="6" y1="6" x2="6.01" y2="6" />
+          <line x1="6" y1="18" x2="6.01" y2="18" />
+        </svg>
+        MT5 Connector
+      </div>
+
+      {/* Connection Status */}
+      {status && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '8px',
+          marginBottom: '16px', padding: '8px 12px', borderRadius: '8px',
+          background: status.connected ? 'rgba(34,197,94,0.08)' : 'rgba(244,63,94,0.08)',
+          border: `1px solid ${status.connected ? 'rgba(34,197,94,0.2)' : 'rgba(244,63,94,0.2)'}`,
+          fontSize: '0.8rem', fontFamily: 'var(--mono)',
+        }}>
+          <div style={{
+            width: '8px', height: '8px', borderRadius: '50%',
+            background: status.connected ? 'var(--green)' : 'var(--red)',
+          }} />
+          <span style={{ color: status.connected ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
+            {status.connected ? 'Local Agent Connected' : 'Local Agent Disconnected'}
+          </span>
+          {status.last_sync && (
+            <span style={{ color: 'var(--text-2)', marginLeft: 'auto', fontSize: '0.72rem' }}>
+              Last sync: {new Date(status.last_sync).toLocaleString()}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Sync Token */}
+      <div style={{ marginBottom: '12px' }}>
+        <label style={{
+          display: 'block', fontSize: '11px', fontFamily: 'var(--mono)',
+          letterSpacing: '0.06em', textTransform: 'uppercase',
+          color: 'var(--text-2)', marginBottom: '8px', fontWeight: 600,
+        }}>Sync Token</label>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <code style={{
+            flex: 1, padding: '8px 12px', borderRadius: '6px',
+            background: 'var(--bg-0)', border: '1px solid var(--border)',
+            color: 'var(--text-0)', fontSize: '0.82rem', fontFamily: 'var(--mono)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {showToken ? (token || '—') : masked}
+          </code>
+          <button className="btn btn-secondary" onClick={() => setShowToken(!showToken)} title={showToken ? 'Hide' : 'Show'}
+            style={{ padding: '6px 10px', fontSize: '0.75rem' }}>
+            {showToken ? '🙈' : '👁️'}
+          </button>
+          <button className="btn btn-secondary" onClick={handleCopy} disabled={!token}
+            style={{ padding: '6px 10px', fontSize: '0.75rem' }}>
+            {copied ? '✓' : '📋'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <button className="btn btn-primary" onClick={handleRegenerate} disabled={regenerating}
+          style={{ fontSize: '0.78rem' }}>
+          {regenerating ? 'Generating…' : hasToken ? '🔄 Regenerate Token' : '🔑 Generate Token'}
+        </button>
+        <span style={{ color: 'var(--text-2)', fontSize: '0.72rem', fontFamily: 'var(--mono)' }}>
+          {hasToken ? 'Regenerating will invalidate the old token.' : 'Generate a token to connect your local MT5 agent.'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+
 export function SettingsPage({ theme, onToggleTheme, currentUser, onLogout, onUserUpdate }) {
   const [settings, setSettings] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -426,6 +539,9 @@ export function SettingsPage({ theme, onToggleTheme, currentUser, onLogout, onUs
           <ProfileSection user={currentUser} onLogout={onLogout} onUserUpdate={onUserUpdate} />
         </div>
       )}
+
+      {/* ══════════════ MT5 Connector ══════════════ */}
+      <ConnectorTokenSection />
 
       {/* ══════════════ Appearance ══════════════ */}
       <div className="card" style={{ marginBottom: '28px' }}>
