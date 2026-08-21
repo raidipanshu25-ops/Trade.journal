@@ -88,15 +88,8 @@ elif MT5_MODE == "sync":
 else:
     logger.info("MT5 cloud mode enabled — using MetaAPI.")
 
-# ── Sync mode: in-memory storage for data pushed by local agent ─────
-_sync_data = {
-    "account": None,
-    "positions": [],
-    "closed_trades": [],
-    "last_sync": None,
-    "last_live_update": None,
-    "connected": False,
-}
+# ── Sync mode: per-user in-memory storage for data pushed by local agent ────
+_sync_data = {}  # keyed by user_id
 _sync_live_subscribers: list[WebSocket] = []  # dashboard clients listening for live updates
 
 # ------------------------------------------------------------------ #
@@ -304,7 +297,7 @@ async def check_auth_middleware(request: Request, call_next):
         return await call_next(request)
     
     path = request.url.path
-    public_paths = ["/api/auth/login", "/api/auth/google", "/api/auth/register", "/api/health", "/api/config"]
+    public_paths = ["/api/auth/login", "/api/auth/google", "/api/auth/register", "/api/health", "/api/config", "/api/sync/auth"]
     
     if path.startswith("/api/") and path not in public_paths:
         if path.startswith("/api/chart/image/"):
@@ -1278,30 +1271,36 @@ def get_webterminal(account_id: int):
 # ------------------------------------------------------------------ #
 @app.get("/api/journal/trades")
 def get_journal_trades(date: str = None, symbol: str = None,
-                       limit: int = 100, offset: int = 0):
+                       limit: int = 100, offset: int = 0,
+                       user=Depends(extract_user_from_token)):
     """Get trade history from the journal with optional filters."""
-    return db.get_trade_history(date=date, symbol=symbol, limit=limit, offset=offset)
+    user_id = user.get("user_id", 0)
+    return db.get_trade_history(date=date, symbol=symbol, limit=limit, offset=offset, user_id=user_id)
 
 
 @app.get("/api/journal/stats")
-def get_journal_stats():
+def get_journal_stats(user=Depends(extract_user_from_token)):
     """Get overall journal statistics (cached 30 s)."""
-    cached = _cache_get("journal_stats")
+    user_id = user.get("user_id", 0)
+    cache_key = f"journal_stats_{user_id}"
+    cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-    result = db.get_journal_stats()
-    _cache_set("journal_stats", result, ttl=30.0)
+    result = db.get_journal_stats(user_id=user_id)
+    _cache_set(cache_key, result, ttl=30.0)
     return result
 
 
 @app.get("/api/journal/analytics")
-def get_journal_analytics():
+def get_journal_analytics(user=Depends(extract_user_from_token)):
     """Get advanced GFT-style analytics for the Account Analysis page (cached 30 s)."""
-    cached = _cache_get("analytics")
+    user_id = user.get("user_id", 0)
+    cache_key = f"analytics_{user_id}"
+    cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-    result = db.get_advanced_analytics()
-    _cache_set("analytics", result, ttl=30.0)
+    result = db.get_advanced_analytics(user_id=user_id)
+    _cache_set(cache_key, result, ttl=30.0)
     return result
 
 
@@ -1976,30 +1975,90 @@ def get_reflections(date: str = None, user=Depends(extract_user_from_token)):
 
 
 # ------------------------------------------------------------------ #
-#  Sync mode: endpoints for local agent to push data
+#  Sync mode: endpoints for local agent to push data (per-user)
 # ------------------------------------------------------------------ #
+def _get_user_sync_data(user_id: int) -> dict:
+    """Get or create per-user sync data cache."""
+    if user_id not in _sync_data:
+        _sync_data[user_id] = {
+            "account": None,
+            "positions": [],
+            "closed_trades": [],
+            "last_sync": None,
+            "last_live_update": None,
+            "connected": False,
+        }
+    return _sync_data[user_id]
+
+
+@app.post("/api/sync/auth")
+async def sync_auth(payload: dict = Body(...)):
+    """Exchange a sync token for a JWT. Used by the local connector."""
+    sync_token = payload.get("sync_token", "")
+    if not sync_token:
+        raise HTTPException(400, "sync_token is required")
+
+    user = db.get_user_by_sync_token(sync_token)
+    if not user:
+        raise HTTPException(401, "Invalid sync token")
+
+    token = create_access_token({
+        "sub": user["username"],
+        "user_id": user["id"],
+        "role": user.get("role", "user")
+    })
+    return {"token": token, "username": user["username"], "user_id": user["id"]}
+
+
+@app.get("/api/user/sync-token")
+def get_user_sync_token(user=Depends(extract_user_from_token)):
+    """Get the current user's sync token."""
+    user_id = user.get("user_id", 0)
+    token = db.get_sync_token(user_id)
+    return {"sync_token": token, "has_token": bool(token)}
+
+
+@app.post("/api/user/sync-token")
+def generate_user_sync_token(user=Depends(extract_user_from_token)):
+    """Generate a new sync token for the current user."""
+    user_id = user.get("user_id", 0)
+    token = db.generate_sync_token(user_id)
+    return {"sync_token": token}
+
+
 @app.post("/api/sync/push")
-async def sync_push(payload: dict = Body(...)):
-    """Receive bulk synced data from local MT5 agent."""
-    # Authenticate
-    api_key = payload.get("api_key", "")
-    if not SYNC_API_KEY or api_key != SYNC_API_KEY:
-        raise HTTPException(403, "Invalid sync API key")
+async def sync_push(request: Request, payload: dict = Body(...)):
+    """Receive bulk synced data from local MT5 agent (per-user via JWT)."""
+    # Authenticate via JWT (from Authorization header)
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        # Fallback: legacy global API key
+        api_key = payload.get("api_key", "")
+        if SYNC_API_KEY and api_key == SYNC_API_KEY:
+            user_id = 1  # Legacy: assign to admin
+        else:
+            raise HTTPException(401, "Authentication required")
+    else:
+        token = auth_header.split(" ", 1)[1]
+        user_data = verify_ws_token(token)
+        if not user_data:
+            raise HTTPException(401, "Invalid token")
+        user_id = user_data.get("user_id", 0)
 
     global _history_updated_flag
+    user_sync = _get_user_sync_data(user_id)
 
     # Store account & positions
-    _sync_data["account"] = payload.get("account")
-    _sync_data["positions"] = payload.get("positions", [])
-    _sync_data["connected"] = payload.get("account") is not None
-    _sync_data["last_sync"] = datetime.now(get_local_tz()).isoformat()
+    user_sync["account"] = payload.get("account")
+    user_sync["positions"] = payload.get("positions", [])
+    user_sync["connected"] = payload.get("account") is not None
+    user_sync["last_sync"] = datetime.now(get_local_tz()).isoformat()
 
     # Process closed trades through existing upsert pipeline
     closed_trades = payload.get("closed_trades", [])
     synced_count = 0
     for trade in closed_trades:
         pid = trade.get("position_id", 0)
-        # Build the aggregated deal dict that upsert_trade_by_position expects
         agg = {
             "position_id": pid,
             "ticket": trade.get("ticket", 0),
@@ -2018,7 +2077,7 @@ async def sync_push(payload: dict = Body(...)):
             "duration_minutes": trade.get("duration_minutes", 0),
             "date": trade.get("close_time", "")[:10] if trade.get("close_time") else "",
         }
-        result = db.upsert_trade_by_position(pid, agg)
+        result = db.upsert_trade_by_position(pid, agg, user_id=user_id)
         if result in ("inserted", "updated"):
             synced_count += 1
 
@@ -2026,24 +2085,37 @@ async def sync_push(payload: dict = Body(...)):
         _history_updated_flag = True
         _cache_invalidate("journal_stats")
         _cache_invalidate("analytics")
-        logger.info(f"Sync push: {synced_count} trades synced from local agent")
+        logger.info(f"Sync push: {synced_count} trades synced for user {user_id}")
 
     return {
         "status": "ok",
         "synced_trades": synced_count,
-        "positions_received": len(_sync_data["positions"]),
+        "positions_received": len(user_sync["positions"]),
     }
 
 
 @app.websocket("/ws/sync/agent")
-async def ws_sync_agent(ws: WebSocket, api_key: str = None):
-    """WebSocket endpoint for local sync agent to push live price/position data."""
-    if not SYNC_API_KEY or api_key != SYNC_API_KEY:
-        await ws.close(code=1008, reason="Invalid sync API key")
+async def ws_sync_agent(ws: WebSocket, token: str = None, api_key: str = None):
+    """WebSocket endpoint for local sync agent to push live data (per-user)."""
+    user_id = None
+
+    # Auth via JWT token (preferred)
+    if token:
+        user_data = verify_ws_token(token)
+        if user_data:
+            user_id = user_data.get("user_id", 0)
+
+    # Fallback: legacy global API key
+    if user_id is None and api_key and SYNC_API_KEY and api_key == SYNC_API_KEY:
+        user_id = 1
+
+    if user_id is None:
+        await ws.close(code=1008, reason="Authentication required")
         return
 
     await ws.accept()
-    logger.info("Local sync agent WebSocket connected")
+    logger.info(f"Sync agent WebSocket connected for user {user_id}")
+    user_sync = _get_user_sync_data(user_id)
 
     try:
         while True:
@@ -2054,30 +2126,31 @@ async def ws_sync_agent(ws: WebSocket, api_key: str = None):
                 continue
 
             if data.get("type") == "live_update":
-                # Update sync cache with live data
-                _sync_data["account"] = data.get("account")
-                _sync_data["positions"] = data.get("positions", [])
-                _sync_data["connected"] = True
-                _sync_data["last_live_update"] = data.get("timestamp", datetime.now(get_local_tz()).isoformat())
+                user_sync["account"] = data.get("account")
+                user_sync["positions"] = data.get("positions", [])
+                user_sync["connected"] = True
+                user_sync["last_live_update"] = data.get("timestamp", datetime.now(get_local_tz()).isoformat())
 
     except WebSocketDisconnect:
-        logger.info("Local sync agent WebSocket disconnected")
-        _sync_data["connected"] = False
+        logger.info(f"Sync agent WebSocket disconnected for user {user_id}")
+        user_sync["connected"] = False
     except Exception as e:
-        logger.warning(f"Sync agent WebSocket error: {e}")
-        _sync_data["connected"] = False
+        logger.warning(f"Sync agent WebSocket error for user {user_id}: {e}")
+        user_sync["connected"] = False
 
 
 @app.get("/api/sync/status")
-async def sync_status():
-    """Check the status of the local sync agent connection."""
+async def sync_status(user=Depends(extract_user_from_token)):
+    """Check the status of the current user's local sync agent."""
+    user_id = user.get("user_id", 0)
+    user_sync = _get_user_sync_data(user_id)
     return {
         "mode": MT5_MODE,
-        "connected": _sync_data["connected"],
-        "last_sync": _sync_data["last_sync"],
-        "last_live_update": _sync_data["last_live_update"],
-        "positions_count": len(_sync_data["positions"]),
-        "account": _sync_data["account"],
+        "connected": user_sync["connected"],
+        "last_sync": user_sync["last_sync"],
+        "last_live_update": user_sync["last_live_update"],
+        "positions_count": len(user_sync["positions"]),
+        "account": user_sync["account"],
     }
 
 

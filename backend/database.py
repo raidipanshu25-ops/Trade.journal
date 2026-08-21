@@ -147,6 +147,7 @@ def init_db():
     # Live-migrate: add position_id column to existing databases
     _migrate_add_position_id()
     _migrate_auth_tables()
+    _migrate_multi_user()
 
 
 def _migrate_add_position_id():
@@ -209,59 +210,91 @@ def _migrate_auth_tables():
     conn.close()
 
 
-def save_alerts(alerts: list[dict], date: str):
+def _migrate_multi_user():
+    """Add multi-user support to existing tables."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    tables = ["trade_history", "alerts", "ai_analyses", "daily_snapshots", "chart_snapshots"]
+    for table in tables:
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_user_id ON {table}(user_id)")
+            conn.commit()
+        except Exception:
+            pass
+            
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN sync_token TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+        
+    for table in tables:
+        try:
+            cursor.execute(f"UPDATE {table} SET user_id = 1 WHERE user_id = 0")
+            conn.commit()
+        except Exception:
+            pass
+    conn.close()
+
+
+def save_alerts(alerts: list[dict], date: str, user_id: int = 0):
     """Persist alerts for a given date (avoids duplicates by clearing first)."""
     conn = get_connection()
     cursor = conn.cursor()
     # Remove old alerts for this date to avoid duplicates on re-check
-    cursor.execute("DELETE FROM alerts WHERE date = ?", (date,))
+    cursor.execute("DELETE FROM alerts WHERE date = ? AND user_id = ?", (date, user_id))
     for a in alerts:
         cursor.execute(
-            "INSERT INTO alerts (timestamp, rule, severity, message, details, acknowledged, date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO alerts (timestamp, rule, severity, message, details, acknowledged, date, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (a["timestamp"], a["rule"], a["severity"], a["message"],
-             a.get("details", ""), 0, date)
+             a.get("details", ""), 0, date, user_id)
         )
     conn.commit()
     conn.close()
 
 
-def get_alerts(date: str = None, limit: int = 50) -> list[dict]:
+def get_alerts(date: str = None, limit: int = 50, user_id: int = 0) -> list[dict]:
     """Retrieve alerts, optionally filtered by date."""
     conn = get_connection()
     cursor = conn.cursor()
     if date:
         cursor.execute(
-            "SELECT * FROM alerts WHERE date = ? ORDER BY id DESC LIMIT ?",
-            (date, limit)
+            "SELECT * FROM alerts WHERE date = ? AND user_id = ? ORDER BY id DESC LIMIT ?",
+            (date, user_id, limit)
         )
     else:
-        cursor.execute("SELECT * FROM alerts ORDER BY id DESC LIMIT ?", (limit,))
+        cursor.execute("SELECT * FROM alerts WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def save_ai_analysis(date: str, analysis_text: str, daily_stats: dict):
+def save_ai_analysis(date: str, analysis_text: str, daily_stats: dict, user_id: int = 0):
     """Save an AI analysis result."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO ai_analyses (date, analysis_text, daily_stats, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO ai_analyses (date, analysis_text, daily_stats, created_at, user_id) VALUES (?, ?, ?, ?, ?)",
         (date, analysis_text, json.dumps(daily_stats),
-         datetime.now(get_local_tz()).isoformat())
+         datetime.now(get_local_tz()).isoformat(), user_id)
     )
     conn.commit()
     conn.close()
 
 
-def get_ai_analysis(date: str) -> dict | None:
+def get_ai_analysis(date: str, user_id: int = 0) -> dict | None:
     """Get the latest AI analysis for a date."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT * FROM ai_analyses WHERE date = ? ORDER BY id DESC LIMIT 1",
-        (date,)
+        "SELECT * FROM ai_analyses WHERE date = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
+        (date, user_id)
     )
     row = cursor.fetchone()
     conn.close()
@@ -273,27 +306,28 @@ def get_ai_analysis(date: str) -> dict | None:
     return None
 
 
-def save_daily_snapshot(date: str, stats: dict, score: int, violations: int):
+def save_daily_snapshot(date: str, stats: dict, score: int, violations: int, user_id: int = 0):
     """Upsert the daily summary snapshot."""
     conn = get_connection()
     cursor = conn.cursor()
+    cursor.execute("DELETE FROM daily_snapshots WHERE date = ? AND user_id = ?", (date, user_id))
     cursor.execute(
-        "INSERT OR REPLACE INTO daily_snapshots (date, stats_json, score, total_violations, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO daily_snapshots (date, stats_json, score, total_violations, created_at, user_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
         (date, json.dumps(stats), score, violations,
-         datetime.now(get_local_tz()).isoformat())
+         datetime.now(get_local_tz()).isoformat(), user_id)
     )
     conn.commit()
     conn.close()
 
 
-def get_history(days: int = 30) -> list[dict]:
+def get_history(days: int = 30, user_id: int = 0) -> list[dict]:
     """Get daily snapshot history."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT ?",
-        (days,)
+        "SELECT * FROM daily_snapshots WHERE user_id = ? ORDER BY date DESC LIMIT ?",
+        (user_id, days)
     )
     rows = cursor.fetchall()
     conn.close()
@@ -309,11 +343,11 @@ def get_history(days: int = 30) -> list[dict]:
 #  Trade History — persistent journal of all closed trades
 # ------------------------------------------------------------------ #
 
-def clear_all_trades():
+def clear_all_trades(user_id: int = 0):
     """Delete all trade history from the journal. Used when switching accounts."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM trades")
+    cursor.execute("DELETE FROM trade_history WHERE user_id = ?", (user_id,))
     deleted = cursor.rowcount
     conn.commit()
     conn.close()
@@ -321,7 +355,7 @@ def clear_all_trades():
     return deleted
 
 
-def save_trade(trade: dict):
+def save_trade(trade: dict, user_id: int = 0):
     """Save a single closed trade to history (ignores duplicates by ticket)."""
     conn = get_connection()
     cursor = conn.cursor()
@@ -329,8 +363,8 @@ def save_trade(trade: dict):
         cursor.execute(
             "INSERT OR IGNORE INTO trade_history "
             "(ticket, order_id, position_id, symbol, type, volume, open_price, close_price, "
-            "profit, commission, swap, open_time, close_time, duration_minutes, comment, date, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "profit, commission, swap, open_time, close_time, duration_minutes, comment, date, created_at, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 trade["ticket"],
                 trade.get("order", 0),
@@ -349,6 +383,7 @@ def save_trade(trade: dict):
                 trade.get("comment", ""),
                 trade.get("date", datetime.now(get_local_tz()).strftime("%Y-%m-%d")),
                 datetime.now(get_local_tz()).isoformat(),
+                user_id,
             )
         )
         conn.commit()
@@ -358,7 +393,7 @@ def save_trade(trade: dict):
         conn.close()
 
 
-def save_trades_batch(trades: list[dict]):
+def save_trades_batch(trades: list[dict], user_id: int = 0):
     """Save multiple trades in a single transaction (real batch insert).
 
     Up to 10x faster than the previous loop-per-trade approach for
@@ -373,8 +408,8 @@ def save_trades_batch(trades: list[dict]):
         cursor.executemany(
             "INSERT OR IGNORE INTO trade_history "
             "(ticket, order_id, position_id, symbol, type, volume, open_price, close_price, "
-            "profit, commission, swap, open_time, close_time, duration_minutes, comment, date, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "profit, commission, swap, open_time, close_time, duration_minutes, comment, date, created_at, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     t["ticket"],
@@ -394,6 +429,7 @@ def save_trades_batch(trades: list[dict]):
                     t.get("comment", ""),
                     t.get("date", datetime.now(get_local_tz()).strftime("%Y-%m-%d")),
                     now_str,
+                    user_id,
                 )
                 for t in trades
             ],
@@ -406,22 +442,22 @@ def save_trades_batch(trades: list[dict]):
         conn.close()
 
 
-def get_trade_by_position_id(position_id: int) -> dict | None:
+def get_trade_by_position_id(position_id: int, user_id: int = 0) -> dict | None:
     """Look up a trade record by its MT5 position_id (used for partial-close deduplication)."""
     if not position_id:
         return None
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT * FROM trade_history WHERE position_id = ? AND position_id != 0 LIMIT 1",
-        (position_id,)
+        "SELECT * FROM trade_history WHERE position_id = ? AND position_id != 0 AND user_id = ? LIMIT 1",
+        (position_id, user_id)
     )
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
 
 
-def upsert_trade_by_position(position_id: int, trade: dict) -> str:
+def upsert_trade_by_position(position_id: int, trade: dict, user_id: int = 0) -> str:
     """
     Partial-close-aware INSERT or UPDATE.
 
@@ -446,24 +482,24 @@ def upsert_trade_by_position(position_id: int, trade: dict) -> str:
         # ── Tier 1: lookup by position_id (primary key for partial-close grouping) ──
         if position_id and position_id != 0:
             cursor.execute(
-                "SELECT id, ticket FROM trade_history WHERE position_id = ? AND position_id != 0 LIMIT 1",
-                (position_id,)
+                "SELECT id, ticket FROM trade_history WHERE position_id = ? AND position_id != 0 AND user_id = ? LIMIT 1",
+                (position_id, user_id)
             )
             existing = cursor.fetchone()
 
         # ── Tier 2: lookup by ticket (handles same-deal re-sync) ──
         if not existing:
             cursor.execute(
-                "SELECT id, ticket FROM trade_history WHERE ticket = ? LIMIT 1",
-                (trade["ticket"],)
+                "SELECT id, ticket FROM trade_history WHERE ticket = ? AND user_id = ? LIMIT 1",
+                (trade["ticket"], user_id)
             )
             existing = cursor.fetchone()
 
         # ── Tier 3: legacy row whose ticket == this position_id ──
         if not existing and position_id and position_id != 0:
             cursor.execute(
-                "SELECT id, ticket FROM trade_history WHERE ticket = ? LIMIT 1",
-                (position_id,)
+                "SELECT id, ticket FROM trade_history WHERE ticket = ? AND user_id = ? LIMIT 1",
+                (position_id, user_id)
             )
             existing = cursor.fetchone()
 
@@ -511,8 +547,8 @@ def upsert_trade_by_position(position_id: int, trade: dict) -> str:
                 INSERT OR IGNORE INTO trade_history
                     (ticket, order_id, position_id, symbol, type, volume,
                      open_price, close_price, profit, commission, swap,
-                     open_time, close_time, duration_minutes, comment, date, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     open_time, close_time, duration_minutes, comment, date, created_at, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade["ticket"],
@@ -532,6 +568,7 @@ def upsert_trade_by_position(position_id: int, trade: dict) -> str:
                     trade.get("comment", ""),
                     trade.get("date", datetime.now(get_local_tz()).strftime("%Y-%m-%d")),
                     datetime.now(get_local_tz()).isoformat(),
+                    user_id,
                 )
             )
             conn.commit()
@@ -585,12 +622,12 @@ def update_trade(ticket: int, data: dict):
 
 
 def get_trade_history(date: str = None, symbol: str = None,
-                      limit: int = 100, offset: int = 0) -> list[dict]:
+                      limit: int = 100, offset: int = 0, user_id: int = 0) -> list[dict]:
     """Get trade history with optional date/symbol filters."""
     conn = get_connection()
     cursor = conn.cursor()
-    query = "SELECT * FROM trade_history WHERE 1=1"
-    params = []
+    query = "SELECT * FROM trade_history WHERE user_id = ?"
+    params = [user_id]
 
     if date:
         query += " AND date = ?"
@@ -608,7 +645,7 @@ def get_trade_history(date: str = None, symbol: str = None,
     return [dict(r) for r in rows]
 
 
-def _compute_period_stats(cursor, date_filter: str = None) -> dict:
+def _compute_period_stats(cursor, date_filter: str = None, user_id: int = 0) -> dict:
     """Compute WR, RR, expectancy, profit factor in a SINGLE SQL query.
 
     Previously fired 6+ separate SELECT statements per period.
@@ -622,7 +659,9 @@ def _compute_period_stats(cursor, date_filter: str = None) -> dict:
         dict with wins, losses, total, win_rate, rr_ratio, expectancy,
         profit_factor, net_pnl, gross_profit, gross_loss, avg_win, avg_loss.
     """
-    where = f"WHERE {date_filter}" if date_filter else ""
+    where = f"WHERE user_id = {user_id}"
+    if date_filter:
+        where += f" AND {date_filter}"
 
     # Single consolidated query — replaces 6 previous round-trips
     cursor.execute(f"""
@@ -687,7 +726,7 @@ def _compute_period_stats(cursor, date_filter: str = None) -> dict:
     }
 
 
-def get_journal_stats() -> dict:
+def get_journal_stats(user_id: int = 0) -> dict:
     """Get journal statistics at daily, weekly, and overall granularity.
     
     Returns daily/weekly/overall WR, RR, expectancy, profit factor,
@@ -703,15 +742,15 @@ def get_journal_stats() -> dict:
     week_ago = (datetime.now(get_local_tz()) - timedelta(days=7)).strftime("%Y-%m-%d")
 
     # Period stats
-    daily = _compute_period_stats(cursor, f"date = '{today}'")
-    weekly = _compute_period_stats(cursor, f"date >= '{week_ago}'")
-    overall = _compute_period_stats(cursor)
+    daily = _compute_period_stats(cursor, f"date = '{today}'", user_id)
+    weekly = _compute_period_stats(cursor, f"date >= '{week_ago}'", user_id)
+    overall = _compute_period_stats(cursor, None, user_id)
 
     # Extra overall-only fields
-    cursor.execute("SELECT DISTINCT symbol FROM trade_history")
+    cursor.execute("SELECT DISTINCT symbol FROM trade_history WHERE user_id = ?", (user_id,))
     symbols = [r["symbol"] for r in cursor.fetchall()]
 
-    cursor.execute("SELECT DISTINCT date FROM trade_history ORDER BY date DESC")
+    cursor.execute("SELECT DISTINCT date FROM trade_history WHERE user_id = ? ORDER BY date DESC", (user_id,))
     trading_days = [r["date"] for r in cursor.fetchall()]
     num_days = len(trading_days)
     overall["avg_trades_per_day"] = round(overall["trades"] / num_days, 1) if num_days > 0 else 0
@@ -724,7 +763,7 @@ def get_journal_stats() -> dict:
         if s_conf.get("enabled", True):
             session_buckets[s_name] = {"wins": 0, "total": 0, "pnl": 0.0}
 
-    cursor.execute("SELECT close_time, profit FROM trade_history")
+    cursor.execute("SELECT close_time, profit FROM trade_history WHERE user_id = ?", (user_id,))
     for r in cursor.fetchall():
         ct = r["close_time"]
         if not ct:
@@ -784,15 +823,15 @@ def get_journal_stats() -> dict:
 #  Chart Snapshots — vision AI capture & analysis
 # ------------------------------------------------------------------ #
 
-def save_chart_snapshot(data: dict) -> int:
+def save_chart_snapshot(data: dict, user_id: int = 0) -> int:
     """Save a chart snapshot and return its ID."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO chart_snapshots "
         "(date, timestamp, image_path, image_hash, context, symbol, timeframe, "
-        "analysis_status, linked_ticket, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "analysis_status, linked_ticket, created_at, user_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             data["date"],
             data["timestamp"],
@@ -804,6 +843,7 @@ def save_chart_snapshot(data: dict) -> int:
             "pending",
             data.get("linked_ticket", 0),
             datetime.now(get_local_tz()).isoformat(),
+            user_id,
         )
     )
     snapshot_id = cursor.lastrowid
@@ -813,12 +853,12 @@ def save_chart_snapshot(data: dict) -> int:
 
 
 def get_chart_snapshots(date: str = None, symbol: str = None,
-                        limit: int = 50, offset: int = 0) -> list[dict]:
+                        limit: int = 50, offset: int = 0, user_id: int = 0) -> list[dict]:
     """Get chart snapshots with optional filters."""
     conn = get_connection()
     cursor = conn.cursor()
-    query = "SELECT * FROM chart_snapshots WHERE 1=1"
-    params = []
+    query = "SELECT * FROM chart_snapshots WHERE user_id = ?"
+    params = [user_id]
     if date:
         query += " AND date = ?"
         params.append(date)
@@ -924,7 +964,7 @@ def get_chart_snapshots_for_rag(limit: int = 10) -> list[dict]:
     return results
 
 
-def export_training_data(start_date: str = None, end_date: str = None) -> dict:
+def export_training_data(start_date: str = None, end_date: str = None, user_id: int = 0) -> dict:
     """Export chart snapshots + trade outcomes as JSON training data."""
     conn = get_connection()
     cursor = conn.cursor()
@@ -934,10 +974,10 @@ def export_training_data(start_date: str = None, end_date: str = None) -> dict:
         "th.close_price as trade_close, th.profit as trade_profit, "
         "th.duration_minutes as trade_duration "
         "FROM chart_snapshots cs "
-        "LEFT JOIN trade_history th ON cs.linked_ticket = th.ticket "
-        "WHERE cs.analysis_status = 'done'"
+        "LEFT JOIN trade_history th ON cs.linked_ticket = th.ticket AND th.user_id = ? "
+        "WHERE cs.analysis_status = 'done' AND cs.user_id = ?"
     )
-    params = []
+    params = [user_id, user_id]
     if start_date:
         query += " AND cs.date >= ?"
         params.append(start_date)
@@ -993,7 +1033,7 @@ def export_training_data(start_date: str = None, end_date: str = None) -> dict:
 #  Advanced Analytics — GFT-style deep analysis
 # ------------------------------------------------------------------ #
 
-def get_advanced_analytics() -> dict:
+def get_advanced_analytics(user_id: int = 0) -> dict:
     """Compute comprehensive analytics replicating Goat Funded Trader dashboard.
     
     Returns a dict with:
@@ -1015,7 +1055,8 @@ def get_advanced_analytics() -> dict:
     
     # Fetch ALL trades at once — more efficient than many queries
     cursor.execute(
-        "SELECT * FROM trade_history ORDER BY close_time ASC"
+        "SELECT * FROM trade_history WHERE user_id = ? ORDER BY close_time ASC",
+        (user_id,)
     )
     all_trades = [dict(r) for r in cursor.fetchall()]
     conn.close()
@@ -1793,3 +1834,34 @@ def delete_mt5_account(account_id: int) -> bool:
     conn.commit()
     conn.close()
     return deleted
+
+
+def generate_sync_token(user_id: int) -> str:
+    """Generate and save a new sync token for a user."""
+    import secrets
+    token = secrets.token_urlsafe(32)
+    conn = get_connection()
+    conn.execute("UPDATE users SET sync_token = ? WHERE id = ?", (token, user_id))
+    conn.commit()
+    conn.close()
+    return token
+
+def get_user_by_sync_token(token: str):
+    """Look up a user by their sync token."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE sync_token = ? AND status = 'active'", (token,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return None
+
+def get_sync_token(user_id: int) -> str:
+    """Get the current sync token for a user."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT sync_token FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row["sync_token"] if row and row["sync_token"] else ""
