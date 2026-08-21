@@ -710,6 +710,9 @@ def health():
 @app.post("/api/mt5/reconnect")
 def mt5_reconnect():
     """Reconnect to the local MT5 desktop terminal and bring window to foreground."""
+    if MT5_MODE == "sync":
+        return {"status": "sync_mode", "mt5_connected": _sync_data["connected"],
+                "detail": "In sync mode — connection managed by local agent"}
     if MT5_MODE != "local" or not _mt5_local:
         raise HTTPException(400, "MT5 reconnect only available in local mode")
     _mt5_local.disconnect()
