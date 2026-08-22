@@ -144,15 +144,172 @@ def auth_headers() -> dict:
     return {"Authorization": f"Bearer {_jwt_token}"} if _jwt_token else {}
 
 
+import subprocess
+
+def auto_detect_mt5_path() -> str:
+    """Find terminal64.exe across environment, registry, and standard/broker directories."""
+    env_path = os.environ.get("MT5_PATH", "").strip()
+    if env_path and Path(env_path).exists():
+        return env_path
+
+    # Check registry
+    try:
+        import winreg
+        for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for sub_path in (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            ):
+                try:
+                    with winreg.OpenKey(root_key, sub_path) as key:
+                        count = winreg.QueryInfoKey(key)[0]
+                        for i in range(count):
+                            try:
+                                subkey_name = winreg.EnumKey(key, i)
+                                with winreg.OpenKey(key, subkey_name) as subkey:
+                                    display_name = ""
+                                    install_loc = ""
+                                    try:
+                                        display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
+                                    except Exception:
+                                        pass
+                                    try:
+                                        install_loc, _ = winreg.QueryValueEx(subkey, "InstallLocation")
+                                    except Exception:
+                                        pass
+                                    if ("metatrader 5" in display_name.lower() or "mt5" in display_name.lower()) and install_loc:
+                                        exe = Path(install_loc) / "terminal64.exe"
+                                        if exe.exists():
+                                            return str(exe)
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    broker_keywords = [
+        "metatrader", "mt5", "exness", "icmarkets", "ic markets",
+        "ftmo", "pepperstone", "xm", "fbs", "avatrade", "fxpro",
+        "roboforex", "vantage", "eightcap", "funded", "terminal"
+    ]
+    for base_dir in [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+    ]:
+        base = Path(base_dir)
+        if not base.exists():
+            continue
+        try:
+            for entry in base.iterdir():
+                if entry.is_dir() and any(k in entry.name.lower() for k in broker_keywords):
+                    exe = entry / "terminal64.exe"
+                    if exe.exists():
+                        return str(exe)
+        except Exception:
+            continue
+
+    for env_var in ["LOCALAPPDATA", "APPDATA"]:
+        app_dir = os.environ.get(env_var, "")
+        if app_dir and Path(app_dir).exists():
+            try:
+                for entry in Path(app_dir).iterdir():
+                    if entry.is_dir() and any(k in entry.name.lower() for k in ["metatrader", "mt5", "metaquotes", "programs"]):
+                        exe = entry / "terminal64.exe"
+                        if exe.exists():
+                            return str(exe)
+                        for sub in entry.iterdir():
+                            if sub.is_dir() and (sub / "terminal64.exe").exists():
+                                return str(sub / "terminal64.exe")
+            except Exception:
+                pass
+
+    default_p = Path(r"C:\Program Files\MetaTrader 5\terminal64.exe")
+    if default_p.exists():
+        return str(default_p)
+    return ""
+
+
+def ensure_mt5_gui_running(mt5_path: str = "") -> bool:
+    """Ensure the MT5 terminal GUI is open and visible on desktop."""
+    exe_path = mt5_path or auto_detect_mt5_path()
+    if not exe_path or not Path(exe_path).exists():
+        return False
+    try:
+        import ctypes
+        import ctypes.wintypes
+        user32 = ctypes.windll.user32
+        found_hwnd = [0]
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+
+        def enum_callback(hwnd, lparam):
+            pid = ctypes.wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            try:
+                import psutil
+                proc = psutil.Process(pid.value)
+                if "terminal64" in proc.name().lower():
+                    title_len = user32.GetWindowTextLengthW(hwnd)
+                    if title_len > 0:
+                        found_hwnd[0] = hwnd
+                        return False
+            except Exception:
+                pass
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+        if found_hwnd[0]:
+            user32.ShowWindow(found_hwnd[0], 5)  # SW_SHOW
+            user32.ShowWindow(found_hwnd[0], 9)  # SW_RESTORE
+            user32.SetForegroundWindow(found_hwnd[0])
+            user32.BringWindowToTop(found_hwnd[0])
+            return True
+
+        # Launch GUI terminal directly
+        try:
+            os.startfile(exe_path)
+        except Exception:
+            subprocess.Popen([exe_path], shell=False, close_fds=True)
+        return True
+    except Exception:
+        return False
+
+
 # ── MT5 Functions ────────────────────────────────────────────────────
 def connect_mt5(mt5_path=None):
-    """Connect to MT5 terminal with retries."""
+    """Connect to MT5 terminal with retries and auto-launch GUI."""
+    if not mt5_path:
+        mt5_path = auto_detect_mt5_path()
+
+    if mt5_path:
+        print_status(f"Target MT5 executable: {mt5_path}")
+        ensure_mt5_gui_running(mt5_path)
+
+    retry_count = 0
     while True:
-        if mt5.initialize(path=mt5_path) if mt5_path else mt5.initialize():
-            print_success("Connected to MT5 terminal.")
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+
+        init_kwargs = {}
+        if mt5_path and Path(mt5_path).exists():
+            init_kwargs["path"] = mt5_path
+
+        if mt5.initialize(**init_kwargs):
+            term_info = mt5.terminal_info()
+            company = getattr(term_info, "company", "MetaQuotes") if term_info else "MetaQuotes"
+            print_success(f"Connected to MT5 terminal ({company}).")
+            if mt5_path:
+                ensure_mt5_gui_running(mt5_path)
             return True
         else:
-            print_error(f"Failed to connect to MT5. Error: {mt5.last_error()}. Retrying in 10s...")
+            retry_count += 1
+            print_error(f"Failed to connect to MT5 (attempt {retry_count}). Error: {mt5.last_error()}.")
+            if retry_count % 3 == 0 and mt5_path:
+                print_status("Attempting to launch MT5 GUI terminal...")
+                ensure_mt5_gui_running(mt5_path)
+            print_status("Retrying in 10s...")
             time.sleep(10)
 
 def get_account_info():

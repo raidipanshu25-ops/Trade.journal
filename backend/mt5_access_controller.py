@@ -53,7 +53,55 @@ class MT5AccessController:
 
     @staticmethod
     def _auto_detect_mt5() -> str:
+        """Find terminal64.exe across environment, registry, and standard/broker directories."""
+        # 1. Check explicit env variable
+        env_path = os.environ.get("MT5_PATH", "").strip()
+        if env_path and Path(env_path).exists():
+            return env_path
+
         candidates = []
+        # 2. Check Windows Registry uninstall keys
+        try:
+            import winreg
+            for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                for sub_path in (
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+                ):
+                    try:
+                        with winreg.OpenKey(root_key, sub_path) as key:
+                            count = winreg.QueryInfoKey(key)[0]
+                            for i in range(count):
+                                try:
+                                    subkey_name = winreg.EnumKey(key, i)
+                                    with winreg.OpenKey(key, subkey_name) as subkey:
+                                        display_name = ""
+                                        install_loc = ""
+                                        try:
+                                            display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
+                                        except Exception:
+                                            pass
+                                        try:
+                                            install_loc, _ = winreg.QueryValueEx(subkey, "InstallLocation")
+                                        except Exception:
+                                            pass
+                                        if ("metatrader 5" in display_name.lower() or "mt5" in display_name.lower()) and install_loc:
+                                            exe = Path(install_loc) / "terminal64.exe"
+                                            if exe.exists():
+                                                candidates.append(str(exe))
+                                except Exception:
+                                    continue
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        # 3. Check Program Files and Program Files (x86)
+        broker_keywords = [
+            "metatrader", "mt5", "exness", "icmarkets", "ic markets",
+            "ftmo", "pepperstone", "xm", "fbs", "avatrade", "fxpro",
+            "roboforex", "vantage", "eightcap", "funded", "terminal"
+        ]
         for base_dir in [
             os.environ.get("ProgramFiles", r"C:\Program Files"),
             os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
@@ -64,20 +112,40 @@ class MT5AccessController:
             try:
                 for entry in base.iterdir():
                     name_lower = entry.name.lower()
-                    if entry.is_dir() and ("metatrader" in name_lower or "mt5" in name_lower or "exness" in name_lower):
+                    if entry.is_dir() and any(k in name_lower for k in broker_keywords):
                         exe = entry / "terminal64.exe"
                         if exe.exists():
                             candidates.append(str(exe))
             except PermissionError:
                 continue
 
-        local_app = os.environ.get("LOCALAPPDATA", "")
-        if local_app:
-            for entry in Path(local_app).iterdir():
-                if entry.is_dir() and ("metatrader" in entry.name.lower() or "mt5" in entry.name.lower()):
-                    exe = entry / "terminal64.exe"
-                    if exe.exists():
-                        candidates.append(str(exe))
+        # 4. Check LOCALAPPDATA and APPDATA
+        for env_var in ["LOCALAPPDATA", "APPDATA"]:
+            app_dir = os.environ.get(env_var, "")
+            if app_dir and Path(app_dir).exists():
+                try:
+                    for entry in Path(app_dir).iterdir():
+                        if entry.is_dir() and any(k in entry.name.lower() for k in ["metatrader", "mt5", "metaquotes", "programs"]):
+                            exe = entry / "terminal64.exe"
+                            if exe.exists():
+                                candidates.append(str(exe))
+                            # Check subfolder e.g. Programs/MetaTrader 5
+                            try:
+                                for sub in entry.iterdir():
+                                    if sub.is_dir():
+                                        sub_exe = sub / "terminal64.exe"
+                                        if sub_exe.exists():
+                                            candidates.append(str(sub_exe))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+        # 5. Fallback check common standard path
+        default_p = Path(r"C:\Program Files\MetaTrader 5\terminal64.exe")
+        if default_p.exists() and str(default_p) not in candidates:
+            candidates.insert(0, str(default_p))
+
         return candidates[0] if candidates else ""
 
     # Maximum extra trades allowed per force-open activation
@@ -164,69 +232,75 @@ class MT5AccessController:
         return result
 
     def _open_mt5(self) -> bool:
-        if self._is_mt5_running():
+        """Ensure MT5 desktop terminal GUI is opened and visible to the user."""
+        # Re-check exe path if not detected earlier
+        if not self._mt5_exe_path or not Path(self._mt5_exe_path).exists():
+            self._mt5_exe_path = self._auto_detect_mt5()
+
+        gui_window_found = False
+        try:
+            import ctypes
+            import ctypes.wintypes
+            user32 = ctypes.windll.user32
+            found_hwnd = [0]
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+
+            def enum_callback(hwnd, lparam):
+                pid = ctypes.wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                try:
+                    import psutil
+                    proc = psutil.Process(pid.value)
+                    if "terminal64" in proc.name().lower():
+                        title_len = user32.GetWindowTextLengthW(hwnd)
+                        if title_len > 0:
+                            found_hwnd[0] = hwnd
+                            return False  # found the visible main window
+                except Exception:
+                    pass
+                return True
+
+            user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+            if found_hwnd[0]:
+                SW_SHOW = 5
+                SW_RESTORE = 9
+                user32.ShowWindow(found_hwnd[0], SW_SHOW)
+                user32.ShowWindow(found_hwnd[0], SW_RESTORE)
+                user32.SetForegroundWindow(found_hwnd[0])
+                user32.BringWindowToTop(found_hwnd[0])
+                self._add_log("🟢 MT5 window brought to foreground")
+                gui_window_found = True
+        except Exception:
+            pass
+
+        # If a visible GUI window was already found and brought to foreground, we're good!
+        if gui_window_found:
             self._state["mt5_is_open"] = True
-            # MT5 is running — try to bring its window to the foreground
-            # (even if hidden, e.g. started by mt5.initialize() from Python)
-            try:
-                import ctypes
-                import ctypes.wintypes
-                user32 = ctypes.windll.user32
-                # Enumerate ALL windows (including hidden ones) to find terminal64
-                found_hwnd = [0]
-                WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
-                def enum_callback(hwnd, lparam):
-                    # Check ALL windows, not just visible ones — MT5 started by
-                    # mt5.initialize() often has a hidden/minimized window
-                    pid = ctypes.wintypes.DWORD()
-                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                    try:
-                        import psutil
-                        proc = psutil.Process(pid.value)
-                        if "terminal64" in proc.name().lower():
-                            # Prefer windows with a title (main window) over tool windows
-                            title_len = user32.GetWindowTextLengthW(hwnd)
-                            if title_len > 0 or found_hwnd[0] == 0:
-                                found_hwnd[0] = hwnd
-                                if title_len > 0:
-                                    return False  # found the main window, stop
-                    except Exception:
-                        pass
-                    return True
-                user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
-                if found_hwnd[0]:
-                    SW_SHOW = 5
-                    SW_RESTORE = 9
-                    # First show the window (makes hidden windows visible)
-                    user32.ShowWindow(found_hwnd[0], SW_SHOW)
-                    # Then restore if minimized
-                    user32.ShowWindow(found_hwnd[0], SW_RESTORE)
-                    # Bring to foreground
-                    user32.SetForegroundWindow(found_hwnd[0])
-                    self._add_log("🟢 MT5 window brought to foreground")
-            except Exception:
-                pass  # best-effort: window focus is non-critical
             return True
 
+        # If MT5 is running but has no visible GUI window (e.g. started in background by mt5.initialize()),
+        # or if MT5 is not running at all, launch terminal64.exe as a visible GUI app
         if not self._mt5_exe_path or not Path(self._mt5_exe_path).exists():
-            self._add_log("⚠️ Cannot open MT5 — exe path not found")
+            self._add_log("⚠️ Cannot open MT5 — terminal64.exe path not found")
             return False
 
         try:
-            # Do NOT use DETACHED_PROCESS — that causes MT5 to open invisibly.
-            # Launch as a normal visible process.
-            subprocess.Popen(
-                [self._mt5_exe_path],
-                shell=False,
-            )
-            # Invalidate the running-cache so the next check reflects the new process
+            # Launch MT5 executable directly so the full desktop GUI window appears
+            try:
+                os.startfile(self._mt5_exe_path)
+            except Exception:
+                subprocess.Popen(
+                    [self._mt5_exe_path],
+                    shell=False,
+                    close_fds=True,
+                )
             self._mt5_running_cache_at = 0.0
             self._state["mt5_is_open"] = True
             reason = self._state.get("reason", "")
-            self._add_log(f"🟢 MT5 OPENED — {reason}")
+            self._add_log(f"🟢 MT5 GUI OPENED — {reason}")
             return True
         except Exception as e:
-            self._add_log(f"❌ Failed to open MT5: {e}")
+            self._add_log(f"❌ Failed to open MT5 GUI: {e}")
             return False
 
     def _close_mt5(self) -> bool:

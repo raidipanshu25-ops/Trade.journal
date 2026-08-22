@@ -7,6 +7,14 @@ Serves the dashboard frontend and exposes REST APIs for:
 - Kimi 2.5 AI trade analysis
 - Settings management
 """
+import sys
+from pathlib import Path
+
+# Ensure backend directory is in sys.path regardless of CWD
+backend_dir = str(Path(__file__).resolve().parent)
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 import logging
 import os
 import asyncio
@@ -2070,7 +2078,7 @@ def generate_connector_zip(sync_token: str = "", backend_url: str = "") -> bytes
             req_content = "MetaTrader5>=5.0.45\nhttpx>=0.27.0\npython-dotenv>=1.0.1\nwebsockets>=12.0\n"
         zf.writestr("requirements.txt", req_content)
         
-        # 3. run_connector.bat
+        # 3. run_connector.bat (Windows Batch Launcher with multi-Python probe)
         bat_content = """@echo off
 title MT5 Trading Journal Connector
 echo ============================================================
@@ -2078,30 +2086,55 @@ echo   MT5 Trading Journal -- Local Connector Launcher
 echo ============================================================
 echo.
 
-:: Detect best Python interpreter
 set PY_CMD=
-where py >nul 2>&1
-if %errorlevel% equ 0 (
-    set PY_CMD=py
-) else (
-    set PY_CMD=python
+
+:: Probe Python candidates in priority order
+for %%P in ("py -3.11" "py -3.12" "py -3.10" "py -3" "py" "python") do (
+    if not defined PY_CMD (
+        %%~P -c "import sys" >nul 2>&1
+        if not errorlevel 1 (
+            set PY_CMD=%%~P
+        )
+    )
 )
 
-:: Check Python installation
-%PY_CMD% --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] Python 3.11+ is not found in your PATH!
-    echo Please install Python from https://www.python.org/
-    echo Make sure to check "Add Python to PATH" during installation.
+:: Check known AppData and ProgramFiles Python paths if not found
+if not defined PY_CMD (
+    for %%D in (
+        "%LOCALAPPDATA%\\Programs\\Python\\Python311\\python.exe"
+        "%LOCALAPPDATA%\\Programs\\Python\\Python312\\python.exe"
+        "%LOCALAPPDATA%\\Programs\\Python\\Python310\\python.exe"
+        "%LOCALAPPDATA%\\Programs\\Python\\Python313\\python.exe"
+        "%LOCALAPPDATA%\\Programs\\Python\\Python314\\python.exe"
+        "%LOCALAPPDATA%\\Python\\bin\\python.exe"
+        "%LOCALAPPDATA%\\Python\\pythoncore-3.14-64\\python.exe"
+        "%ProgramFiles%\\Python311\\python.exe"
+        "%ProgramFiles%\\Python312\\python.exe"
+        "%ProgramFiles%\\Python310\\python.exe"
+        "C:\\Python311\\python.exe"
+        "C:\\Python312\\python.exe"
+    ) do (
+        if not defined PY_CMD if exist "%%~D" (
+            set PY_CMD="%%~D"
+        )
+    )
+)
+
+if not defined PY_CMD (
+    echo [ERROR] Python is not found on your system!
+    echo Please install Python 3.11 or higher from https://www.python.org/
+    echo IMPORTANT: Make sure to check "Add Python to PATH" during installation.
     echo.
     pause
     exit /b 1
 )
 
-echo [1/2] Installing / checking required packages...
-%PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv
+echo [1/2] Using Python: %PY_CMD%
+echo Installing / verifying required packages...
+%PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [WARNING] Package installation encountered an issue. Proceeding anyway...
+    echo [INFO] Pip install output:
+    %PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv
 )
 
 echo.
@@ -2122,8 +2155,73 @@ if %errorlevel% neq 0 (
 )
 """
         zf.writestr("run_connector.bat", bat_content)
+
+        # 4. run_connector.ps1 (PowerShell launcher)
+        ps1_content = """# MT5 Trading Journal - PowerShell Launcher
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  MT5 Trading Journal -- Local Connector Launcher" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+
+$pythonCmd = $null
+$candidates = @("py -3.11", "py -3.12", "py -3.10", "py -3", "py", "python")
+
+foreach ($c in $candidates) {
+    try {
+        $parts = $c -split " "
+        $exe = $parts[0]
+        $args = $parts[1..($parts.Length-1)]
+        $res = Start-Process -FilePath $exe -ArgumentList ($args + @("-c", "import sys")) -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+        if ($res -and $res.ExitCode -eq 0) {
+            $pythonCmd = $c
+            break
+        }
+    } catch {}
+}
+
+if (-not $pythonCmd) {
+    $commonPaths = @(
+        "$env:LOCALAPPDATA\\Programs\\Python\\Python311\\python.exe",
+        "$env:LOCALAPPDATA\\Programs\\Python\\Python312\\python.exe",
+        "$env:LOCALAPPDATA\\Programs\\Python\\Python310\\python.exe",
+        "$env:LOCALAPPDATA\\Python\\bin\\python.exe",
+        "$env:ProgramFiles\\Python311\\python.exe",
+        "$env:ProgramFiles\\Python312\\python.exe"
+    )
+    foreach ($p in $commonPaths) {
+        if (Test-Path $p) {
+            $pythonCmd = "`"$p`""
+            break
+        }
+    }
+}
+
+if (-not $pythonCmd) {
+    Write-Host "[ERROR] Python 3.11+ is not found!" -ForegroundColor Red
+    Write-Host "Please install Python from https://www.python.org/ (Check 'Add Python to PATH')"
+    Read-Host "Press Enter to exit..."
+    exit 1
+}
+
+Write-Host "[1/2] Installing / verifying dependencies with $pythonCmd..." -ForegroundColor Green
+$installArgs = "-m pip install MetaTrader5 httpx websockets python-dotenv"
+Invoke-Expression "$pythonCmd $installArgs"
+
+Write-Host ""
+Write-Host "[2/2] Starting MT5 Sync Agent..." -ForegroundColor Green
+if (Test-Path "local_sync_agent.py") {
+    Invoke-Expression "$pythonCmd local_sync_agent.py"
+} elseif (Test-Path "backend\\local_sync_agent.py") {
+    Invoke-Expression "$pythonCmd backend\\local_sync_agent.py"
+} else {
+    Write-Host "[ERROR] local_sync_agent.py not found!" -ForegroundColor Red
+}
+
+Read-Host "Press Enter to exit..."
+"""
+        zf.writestr("run_connector.ps1", ps1_content)
         
-        # 4. .env & .env.example
+        # 5. .env & .env.example
         env_content = f"""# MT5 Trading Journal Connector Configuration
 RENDER_BACKEND_URL={backend_url or "https://trade-journal-ukc2.onrender.com"}
 SYNC_TOKEN={sync_token}
@@ -2133,7 +2231,7 @@ MT5_PATH=
         if sync_token:
             zf.writestr(".env", env_content)
             
-        # 5. README.txt
+        # 6. README.txt
         readme_content = """========================================================================
   MT5 Trading Journal — Local Sync Connector
 ========================================================================
@@ -2146,12 +2244,13 @@ Requirements:
 
 Quick Start:
 1. Extract all files from this ZIP into any folder (e.g. C:\\TJ-Connector).
-2. Double-click `run_connector.bat` (or open a terminal and run `python local_sync_agent.py`).
-3. Follow the one-time interactive prompt:
-   - Backend URL: Press Enter for default (or paste your Render backend URL)
+2. Double-click `run_connector.bat` (or right-click `run_connector.ps1` -> Run with PowerShell).
+3. The connector will automatically detect your MetaTrader 5 installation and bring up the terminal GUI.
+4. If prompted on first run:
+   - Backend URL: Press Enter for default
    - Sync Token: Paste your sync token from your Trading Journal Settings or Onboarding.
-4. Leave the terminal running in the background while MetaTrader 5 is open.
-   Your positions and trades will automatically stream live to your journal!
+5. Leave the connector running in the background while trading!
+   Your positions and trades will automatically stream live to your journal.
 
 Troubleshooting:
 - If `run_connector.bat` closes immediately, open Command Prompt in this folder and run:

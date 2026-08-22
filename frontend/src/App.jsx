@@ -12,11 +12,7 @@ import { PreTradeGate } from './components/PreTradeGate';
 import { PostTradeReflection } from './components/PostTradeReflection';
 import { ConnectorStatus } from './components/ConnectorStatus';
 
-// applyThemePreset is a pure function (no JSX) — import it directly
-// so SettingsPage.jsx can remain fully lazy-loaded.
-// We re-export applyThemePreset from a tiny shim to avoid the mixed
-// static+dynamic import Vite warning.
-import { applyThemePreset, applyBgPreset, applyAccentPreset, applyTextPreset } from './components/SettingsPage';
+import { applyThemePreset, applyBgPreset, applyAccentPreset, applyTextPreset } from './utils/theme';
 import { api, authApi } from './api';
 
 // ── Lazy-load heavy page components ──────────────────────────────────

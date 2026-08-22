@@ -5,30 +5,55 @@ echo   MT5 Trading Journal -- Local Connector Launcher
 echo ============================================================
 echo.
 
-:: Detect best Python interpreter
 set PY_CMD=
-where py >nul 2>&1
-if %errorlevel% equ 0 (
-    set PY_CMD=py
-) else (
-    set PY_CMD=python
+
+:: Probe Python candidates in priority order
+for %%P in ("py -3.11" "py -3.12" "py -3.10" "py -3" "py" "python") do (
+    if not defined PY_CMD (
+        %%~P -c "import sys" >nul 2>&1
+        if not errorlevel 1 (
+            set PY_CMD=%%~P
+        )
+    )
 )
 
-:: Check Python installation
-%PY_CMD% --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] Python is not found in your PATH!
-    echo Please install Python 3.11 or higher from https://www.python.org/
-    echo Make sure to check "Add Python to PATH" during installation.
+:: Check known AppData and ProgramFiles Python paths if not found
+if not defined PY_CMD (
+    for %%D in (
+        "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+        "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+        "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
+        "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
+        "%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
+        "%LOCALAPPDATA%\Python\bin\python.exe"
+        "%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe"
+        "%ProgramFiles%\Python311\python.exe"
+        "%ProgramFiles%\Python312\python.exe"
+        "%ProgramFiles%\Python310\python.exe"
+        "C:\Python311\python.exe"
+        "C:\Python312\python.exe"
+    ) do (
+        if not defined PY_CMD if exist "%%~D" (
+            set PY_CMD="%%~D"
+        )
+    )
+)
+
+if not defined PY_CMD (
+    echo [ERROR] Python 3.11+ is not found in your PATH!
+    echo Please install Python from https://www.python.org/
+    echo IMPORTANT: Make sure to check "Add Python to PATH" during installation.
     echo.
     pause
     exit /b 1
 )
 
-echo [1/2] Installing / verifying required packages...
-%PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv
+echo [1/2] Using Python: %PY_CMD%
+echo Installing / verifying required packages...
+%PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [WARNING] Package installation encountered an issue. Proceeding anyway...
+    echo [INFO] Package install output:
+    %PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv
 )
 
 echo.
@@ -44,6 +69,7 @@ if exist "backend\local_sync_agent.py" (
 
 if %errorlevel% neq 0 (
     echo.
-    echo [ERROR] Sync agent stopped with an error.
+    echo [ERROR] MT5 Sync Agent stopped with an error.
     pause
 )
+
