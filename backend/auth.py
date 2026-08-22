@@ -4,7 +4,7 @@ import secrets
 import io
 import base64
 from datetime import datetime, timedelta, timezone
-from fastapi import HTTPException, Security
+from fastapi import HTTPException, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from config import ADMIN_PASSWORD, SECRET_KEY, ALGORITHM
 
@@ -24,13 +24,31 @@ def hash_token(token: str) -> str:
     """SHA-256 hash of a JWT for session tracking."""
     return hashlib.sha256(token.encode()).hexdigest()
 
-def extract_user_from_token(token: str) -> dict | None:
+def _decode_token(token: str) -> dict | None:
     """Decode a JWT and return the payload (without raising)."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
     except jwt.InvalidTokenError:
         return None
+
+def extract_user_from_token(request: Request = None) -> dict | None:
+    """FastAPI dependency: extract user from JWT in Authorization header.
+    
+    Also works as a direct call: extract_user_from_token(raw_token_string)
+    for backward compatibility with code that passes a token string directly.
+    """
+    # Backward compat: if called with a plain string (not a Request)
+    if isinstance(request, str):
+        return _decode_token(request)
+    # FastAPI dependency path: read from Authorization header
+    if request and hasattr(request, 'headers'):
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            return _decode_token(auth_header.split(" ", 1)[1])
+    if not ADMIN_PASSWORD:
+        return {"sub": "anonymous", "user_id": 0, "role": "user"}
+    return None
 
 async def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     """Dependency to check the JWT token for REST endpoints."""

@@ -363,7 +363,7 @@ function App() {
               </div>
             </div>
 
-            {!mt5Connected && !dash.loading && (
+            {!mt5Connected && !dash.loading && appConfig.mt5_mode !== 'sync' && (
               <div className="connection-banner">
                 <div className="connection-banner-icon">
                   <svg viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round">
@@ -387,6 +387,33 @@ function App() {
                     <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
                   </svg>
                   Reconnect
+                </button>
+              </div>
+            )}
+            {!syncStatus.connected && !dash.loading && appConfig.mt5_mode === 'sync' && (
+              <div className="connection-banner">
+                <div className="connection-banner-icon">
+                  <svg viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18.36 5.64a9 9 0 0 1 0 12.73"/>
+                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                    <line x1="2" y1="2" x2="22" y2="22"/>
+                  </svg>
+                </div>
+                <div className="connection-banner-text">
+                  <h3>MT5 Connector Not Running</h3>
+                  <p>Start the local MT5 connector script on your PC to sync trades.</p>
+                </div>
+                <button
+                  className="btn btn-primary"
+                  style={{ marginLeft: 'auto' }}
+                  onClick={() => {
+                    setOnboardingDismissed(false);
+                    localStorage.removeItem('tj-onboarding-dismissed');
+                    setShowOnboarding(true);
+                  }}
+                  id="setup-connector-btn"
+                >
+                  Setup Guide
                 </button>
               </div>
             )}

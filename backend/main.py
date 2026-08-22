@@ -297,7 +297,7 @@ async def check_auth_middleware(request: Request, call_next):
         return await call_next(request)
     
     path = request.url.path
-    public_paths = ["/api/auth/login", "/api/auth/google", "/api/auth/register", "/api/health", "/api/config", "/api/sync/auth"]
+    public_paths = ["/api/auth/login", "/api/auth/google", "/api/auth/register", "/api/health", "/api/config", "/api/sync/auth", "/api/sync/push"]
     
     if path.startswith("/api/") and path not in public_paths:
         if path.startswith("/api/chart/image/"):
@@ -2026,6 +2026,9 @@ async def sync_auth(payload: dict = Body(...)):
         "user_id": user["id"],
         "role": user.get("role", "user")
     })
+    # Register the session so the auth middleware doesn't reject the agent
+    token_h = hash_token(token)
+    db.create_session(user["id"], token_h, device_info="MT5 Sync Agent", ip_address="local")
     return {"token": token, "username": user["username"], "user_id": user["id"]}
 
 
