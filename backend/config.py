@@ -169,8 +169,39 @@ MT5_PATH = os.getenv("MT5_PATH", "")
 SYNC_API_KEY = os.getenv("SYNC_API_KEY", "")
 
 # Authentication config
+import secrets
+
+def _get_or_create_secret_key() -> str:
+    """Load SECRET_KEY or generate a persistent secure key in .env."""
+    key = os.getenv("SECRET_KEY", "").strip()
+    if key and key != "tj-default-insecure-secret-key-change-in-production":
+        return key
+
+    new_key = secrets.token_hex(32)
+    env_file = Path(__file__).parent / ".env"
+    try:
+        if env_file.exists():
+            content = env_file.read_text(encoding="utf-8")
+            if "SECRET_KEY=" in content:
+                lines = []
+                for line in content.splitlines():
+                    if line.startswith("SECRET_KEY="):
+                        lines.append(f"SECRET_KEY={new_key}")
+                    else:
+                        lines.append(line)
+                env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            else:
+                with open(env_file, "a", encoding="utf-8") as f:
+                    f.write(f"\nSECRET_KEY={new_key}\n")
+        else:
+            env_file.write_text(f"SECRET_KEY={new_key}\n", encoding="utf-8")
+    except Exception:
+        pass
+    os.environ["SECRET_KEY"] = new_key
+    return new_key
+
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
-SECRET_KEY     = os.getenv("SECRET_KEY", "tj-default-insecure-secret-key-change-in-production")
+SECRET_KEY     = _get_or_create_secret_key()
 ALGORITHM      = "HS256"
 
 # Google SSO

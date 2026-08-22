@@ -32,6 +32,7 @@ ENV/
 *.sqlite
 *.sqlite3
 *.db
+backend/backups/
 
 # Env secrets
 .env

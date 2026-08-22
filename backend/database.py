@@ -1865,3 +1865,53 @@ def get_sync_token(user_id: int) -> str:
     row = cursor.fetchone()
     conn.close()
     return row["sync_token"] if row and row["sync_token"] else ""
+
+
+def backup_db(max_backups: int = 7) -> str | None:
+    """Create a consistent online SQLite backup and rotate older backups."""
+    if not DB_PATH.exists():
+        return None
+
+    backups_dir = DB_PATH.parent / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    backup_file = backups_dir / f"trading_journal_{timestamp}.db"
+
+    # Use SQLite's online backup API to copy cleanly without locking readers/writers
+    source_conn = get_connection()
+    dest_conn = sqlite3.connect(str(backup_file))
+    try:
+        source_conn.backup(dest_conn)
+    finally:
+        dest_conn.close()
+        source_conn.close()
+
+    # Rotation: Keep only the most recent max_backups
+    existing = sorted(backups_dir.glob("trading_journal_*.db"), key=lambda p: p.stat().st_mtime)
+    while len(existing) > max_backups:
+        oldest = existing.pop(0)
+        try:
+            oldest.unlink()
+        except Exception:
+            pass
+
+    return str(backup_file)
+
+
+def list_backups() -> list[dict]:
+    """List all available database backups."""
+    backups_dir = DB_PATH.parent / "backups"
+    if not backups_dir.exists():
+        return []
+    backups = []
+    for f in sorted(backups_dir.glob("trading_journal_*.db"), key=lambda p: p.stat().st_mtime, reverse=True):
+        stat = f.stat()
+        backups.append({
+            "filename": f.name,
+            "path": str(f),
+            "size_bytes": stat.st_size,
+            "size_kb": round(stat.st_size / 1024, 2),
+            "created_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        })
+    return backups

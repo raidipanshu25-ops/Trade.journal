@@ -149,15 +149,39 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(_background_sync_loop())
     # MT5 Access Controller loop
     access_task = asyncio.create_task(_mt5_access_loop())
+    # Database automated backup loop (runs every 6h, initial backup on start)
+    backup_task = asyncio.create_task(_database_backup_loop())
     yield
     task.cancel()
     access_task.cancel()
+    backup_task.cancel()
     # Disconnect local MT5 on shutdown
     if MT5_MODE == "local" and _mt5_local:
         _mt5_local.disconnect()
     logger.info("Backend shutdown")
 
 _history_updated_flag = False
+
+async def _database_backup_loop():
+    """Automated SQLite backup: runs on startup and every 6 hours."""
+    # Perform quick initial backup on startup
+    try:
+        bpath = db.backup_db(max_backups=7)
+        if bpath:
+            logger.info(f"💾 Initial database backup created: {Path(bpath).name}")
+    except Exception as e:
+        logger.warning(f"Could not create initial database backup: {e}")
+
+    while True:
+        try:
+            await asyncio.sleep(21600)  # 6 hours
+            bpath = db.backup_db(max_backups=7)
+            if bpath:
+                logger.info(f"💾 Automated database backup created: {Path(bpath).name}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Failed to create automated database backup: {e}")
 
 async def _background_sync_loop():
     """Every 60 s: sync trade data (local MT5 or MetaAPI cloud)."""
@@ -2298,6 +2322,50 @@ def download_connector(token: str = None, request: Request = None):
         headers={
             "Content-Disposition": 'attachment; filename="tj-mt5-connector.zip"'
         }
+    )
+
+
+# ------------------------------------------------------------------ #
+#  Database Backup & Maintenance
+# ------------------------------------------------------------------ #
+@app.get("/api/admin/backups")
+def get_database_backups(user=Depends(extract_user_from_token)):
+    """List all available automated & manual database backups."""
+    backups = db.list_backups()
+    return {"backups": backups, "count": len(backups)}
+
+
+@app.post("/api/admin/backup")
+def create_database_backup(user=Depends(extract_user_from_token)):
+    """Trigger an immediate, atomic online backup of the SQLite database."""
+    bpath = db.backup_db(max_backups=7)
+    if not bpath:
+        raise HTTPException(500, "Failed to create database backup")
+    return {
+        "status": "success",
+        "message": "Database backup created successfully",
+        "backup": {
+            "filename": Path(bpath).name,
+            "path": bpath,
+            "size_kb": round(Path(bpath).stat().st_size / 1024, 2),
+            "created_at": datetime.now().isoformat(),
+        }
+    }
+
+
+@app.get("/api/admin/backup/download/{filename}")
+def download_database_backup(filename: str, user=Depends(extract_user_from_token)):
+    """Download a specific database backup snapshot."""
+    safe_name = Path(filename).name
+    if not safe_name.startswith("trading_journal_") or not safe_name.endswith(".db"):
+        raise HTTPException(400, "Invalid backup filename")
+    backup_path = Path(__file__).parent / "backups" / safe_name
+    if not backup_path.exists():
+        raise HTTPException(404, "Backup file not found")
+    return FileResponse(
+        path=str(backup_path),
+        filename=safe_name,
+        media_type="application/octet-stream"
     )
 
 
