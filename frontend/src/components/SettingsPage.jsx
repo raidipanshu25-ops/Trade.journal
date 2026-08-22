@@ -302,12 +302,20 @@ function ConnectorTokenSection() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn btn-primary" onClick={handleRegenerate} disabled={regenerating}
           style={{ fontSize: '0.78rem' }}>
           {regenerating ? 'Generating…' : hasToken ? '🔄 Regenerate Token' : '🔑 Generate Token'}
         </button>
-        <span style={{ color: 'var(--text-2)', fontSize: '0.72rem', fontFamily: 'var(--mono)' }}>
+        <a 
+          href={`/api/sync/connector.zip?token=${encodeURIComponent(token || '')}`} 
+          download="tj-mt5-connector.zip"
+          className="btn btn-secondary"
+          style={{ fontSize: '0.78rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+        >
+          <span>📥</span> Download Connector (.zip)
+        </a>
+        <span style={{ color: 'var(--text-2)', fontSize: '0.72rem', fontFamily: 'var(--mono)', width: '100%', marginTop: '4px' }}>
           {hasToken ? 'Regenerating will invalidate the old token.' : 'Generate a token to connect your local MT5 agent.'}
         </span>
       </div>

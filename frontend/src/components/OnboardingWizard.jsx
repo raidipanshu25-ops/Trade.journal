@@ -215,26 +215,44 @@ export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip })
 
             <div style={{ fontSize: '0.88rem', color: 'var(--text-1)', lineHeight: 1.6, marginBottom: '32px' }}>
               <ol style={{ paddingLeft: '20px', display: 'flex', flexDirection: 'column', gap: '16px', margin: 0 }}>
-                <li>Install <strong>Python 3.11+</strong> from python.org</li>
-                <li><a href="/connector.zip" style={{ color: 'var(--cyan)', fontWeight: 500, textDecoration: 'none' }}>Download the MT5 Connector files</a></li>
                 <li>
-                  Open a terminal and run:
-                  <div style={{ background: 'var(--bg-0)', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', fontFamily: 'var(--mono)', fontSize: '0.75rem', marginTop: '6px', color: 'var(--text-0)' }}>
-                    pip install MetaTrader5 httpx websockets python-dotenv
+                  Install <strong>Python 3.11+</strong> from <a href="https://www.python.org/downloads/" target="_blank" rel="noreferrer" style={{ color: 'var(--cyan)', textDecoration: 'underline' }}>python.org</a>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-2)', marginTop: '2px' }}>
+                    ⚠️ When installing, check the box: <em>"Add Python to PATH"</em>
                   </div>
                 </li>
                 <li>
-                  Create a <code style={{ fontFamily: 'var(--mono)', color: 'var(--cyan)' }}>.env</code> file in the connector folder with:
-                  <div style={{ background: 'var(--bg-0)', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', fontFamily: 'var(--mono)', fontSize: '0.75rem', marginTop: '6px', color: 'var(--text-0)', whiteSpace: 'pre-wrap' }}>
-                    RENDER_BACKEND_URL=http://localhost:8000<br/>
-                    SYNC_TOKEN={syncToken || 'YOUR_TOKEN'}
+                  <div><strong>Download & extract</strong> the MT5 Connector package:</div>
+                  <div style={{ marginTop: '8px' }}>
+                    <a 
+                      href={`/api/sync/connector.zip?token=${encodeURIComponent(syncToken || '')}`} 
+                      download="tj-mt5-connector.zip"
+                      style={{ 
+                        display: 'inline-flex', alignItems: 'center', gap: '8px',
+                        padding: '9px 18px', background: 'var(--cyan-dim)', border: '1px solid var(--cyan-border)',
+                        borderRadius: '8px', color: 'var(--cyan)', fontWeight: 600, textDecoration: 'none',
+                        fontSize: '0.88rem', boxShadow: 'var(--cyan-glow-sm)', transition: 'all 0.2s'
+                      }}
+                      onMouseOver={(e) => e.currentTarget.style.background = 'rgba(0, 217, 163, 0.2)'}
+                      onMouseOut={(e) => e.currentTarget.style.background = 'var(--cyan-dim)'}
+                    >
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      Download MT5 Connector (.zip)
+                    </a>
                   </div>
                 </li>
                 <li>
-                  Run the script:
-                  <div style={{ background: 'var(--bg-0)', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', fontFamily: 'var(--mono)', fontSize: '0.75rem', marginTop: '6px', color: 'var(--text-0)' }}>
-                    python local_sync_agent.py
+                  Extract the zip, then <strong>double-click</strong> <code style={{ fontFamily: 'var(--mono)', color: 'var(--cyan)', background: 'var(--bg-0)', padding: '2px 6px', borderRadius: '4px' }}>run_connector.bat</code>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-2)', marginTop: '4px' }}>
+                    Or open terminal in the folder and run: <code style={{ fontFamily: 'var(--mono)', color: 'var(--text-0)' }}>python local_sync_agent.py</code>
                   </div>
+                </li>
+                <li>
+                  Keep the connector terminal open while MetaTrader 5 is running.
                 </li>
               </ol>
             </div>

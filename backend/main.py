@@ -18,11 +18,14 @@ from config import get_local_tz
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import io
+import zipfile
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, Request, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from config import load_settings, save_settings, METAAPI_TOKEN, HOST, PORT, ADMIN_PASSWORD, GOOGLE_CLIENT_ID, AUTHORIZED_EMAILS, MT5_MODE, MT5_PATH, ALLOW_REGISTRATION, SECRET_KEY, SYNC_API_KEY
@@ -2032,11 +2035,110 @@ async def sync_auth(payload: dict = Body(...)):
     return {"token": token, "username": user["username"], "user_id": user["id"]}
 
 
+def generate_connector_zip(sync_token: str = "", backend_url: str = "") -> bytes:
+    """Generate a zip package containing MT5 local sync agent and setup files."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 1. local_sync_agent.py
+        agent_path = Path(__file__).parent / "local_sync_agent.py"
+        if agent_path.exists():
+            zf.writestr("local_sync_agent.py", agent_path.read_text(encoding="utf-8"))
+        
+        # 2. requirements.txt
+        req_path = Path(__file__).parent / "requirements_local.txt"
+        if req_path.exists():
+            req_content = req_path.read_text(encoding="utf-8")
+        else:
+            req_content = "MetaTrader5>=5.0.45\nhttpx>=0.27.0\npython-dotenv>=1.0.1\nwebsockets>=12.0\n"
+        zf.writestr("requirements.txt", req_content)
+        
+        # 3. run_connector.bat
+        bat_content = """@echo off
+title MT5 Trading Journal Connector
+echo ============================================================
+echo   MT5 Trading Journal -- Local Connector Launcher
+echo ============================================================
+echo.
+
+python --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] Python 3.11+ is not found in your PATH!
+    echo Please install Python from https://www.python.org/
+    echo Make sure to check "Add Python to PATH" during installation.
+    echo.
+    pause
+    exit /b 1
+)
+
+echo [1/2] Installing / checking required packages...
+pip install MetaTrader5 httpx websockets python-dotenv
+if %errorlevel% neq 0 (
+    echo [WARNING] Package installation encountered an issue. Proceeding anyway...
+)
+
+echo.
+echo [2/2] Starting MT5 Sync Agent...
+echo.
+python local_sync_agent.py
+
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERROR] MT5 Sync Agent exited with an error.
+    pause
+)
+"""
+        zf.writestr("run_connector.bat", bat_content)
+        
+        # 4. .env & .env.example
+        env_content = f"""# MT5 Trading Journal Connector Configuration
+RENDER_BACKEND_URL={backend_url or "https://trade-journal-ukc2.onrender.com"}
+SYNC_TOKEN={sync_token}
+MT5_PATH=
+"""
+        zf.writestr(".env.example", env_content)
+        if sync_token:
+            zf.writestr(".env", env_content)
+            
+        # 5. README.txt
+        readme_content = """========================================================================
+  MT5 Trading Journal — Local Sync Connector
+========================================================================
+
+Requirements:
+1. Windows PC with MetaTrader 5 installed & running
+2. Python 3.11 or higher (from https://www.python.org/downloads/)
+   * IMPORTANT: When installing Python, check the box:
+     [x] "Add Python to PATH"
+
+Quick Start:
+1. Extract all files from this ZIP into any folder (e.g. C:\\TJ-Connector).
+2. Double-click `run_connector.bat` (or open a terminal and run `python local_sync_agent.py`).
+3. Follow the one-time interactive prompt:
+   - Backend URL: Press Enter for default (or paste your Render backend URL)
+   - Sync Token: Paste your sync token from your Trading Journal Settings or Onboarding.
+4. Leave the terminal running in the background while MetaTrader 5 is open.
+   Your positions and trades will automatically stream live to your journal!
+
+Troubleshooting:
+- If `run_connector.bat` closes immediately, open Command Prompt in this folder and run:
+    pip install MetaTrader5 httpx websockets python-dotenv
+    python local_sync_agent.py
+- Make sure "Allow Algo Trading" is enabled in MetaTrader 5:
+    Tools -> Options -> Expert Advisors -> Allow algorithmic trading.
+"""
+        zf.writestr("README.txt", readme_content)
+        
+    buf.seek(0)
+    return buf.getvalue()
+
+
 @app.get("/api/user/sync-token")
 def get_user_sync_token(user=Depends(extract_user_from_token)):
-    """Get the current user's sync token."""
+    """Get the current user's sync token. Auto-generates if missing."""
     user_id = user.get("user_id", 0)
     token = db.get_sync_token(user_id)
+    if not token and user_id:
+        token = db.generate_sync_token(user_id)
     return {"sync_token": token, "has_token": bool(token)}
 
 
@@ -2046,6 +2148,24 @@ def generate_user_sync_token(user=Depends(extract_user_from_token)):
     user_id = user.get("user_id", 0)
     token = db.generate_sync_token(user_id)
     return {"sync_token": token}
+
+
+@app.get("/api/sync/connector.zip")
+@app.get("/api/download-connector")
+@app.get("/connector.zip")
+def download_connector(token: str = None, request: Request = None):
+    """Download the MT5 local connector package with optional pre-configured token."""
+    backend_url = ""
+    if request:
+        backend_url = f"{request.url.scheme}://{request.url.netloc}"
+    zip_bytes = generate_connector_zip(sync_token=token or "", backend_url=backend_url)
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="tj-mt5-connector.zip"'
+        }
+    )
 
 
 @app.post("/api/sync/push")
