@@ -2078,7 +2078,17 @@ echo   MT5 Trading Journal -- Local Connector Launcher
 echo ============================================================
 echo.
 
-python --version >nul 2>&1
+:: Detect best Python interpreter
+set PY_CMD=
+where py >nul 2>&1
+if %errorlevel% equ 0 (
+    set PY_CMD=py
+) else (
+    set PY_CMD=python
+)
+
+:: Check Python installation
+%PY_CMD% --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERROR] Python 3.11+ is not found in your PATH!
     echo Please install Python from https://www.python.org/
@@ -2089,7 +2099,7 @@ if %errorlevel% neq 0 (
 )
 
 echo [1/2] Installing / checking required packages...
-pip install MetaTrader5 httpx websockets python-dotenv
+%PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv
 if %errorlevel% neq 0 (
     echo [WARNING] Package installation encountered an issue. Proceeding anyway...
 )
@@ -2097,7 +2107,13 @@ if %errorlevel% neq 0 (
 echo.
 echo [2/2] Starting MT5 Sync Agent...
 echo.
-python local_sync_agent.py
+if exist "local_sync_agent.py" (
+    %PY_CMD% local_sync_agent.py
+) else if exist "backend\\local_sync_agent.py" (
+    %PY_CMD% backend\\local_sync_agent.py
+) else (
+    echo [ERROR] Cannot find local_sync_agent.py!
+)
 
 if %errorlevel% neq 0 (
     echo.
