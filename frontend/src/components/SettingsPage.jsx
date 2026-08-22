@@ -214,6 +214,8 @@ function ConnectorTokenSection() {
   const [regenerating, setRegenerating] = useState(false);
   const [status, setStatus] = useState(null);
 
+  const [downloading, setDownloading] = useState(false);
+
   useEffect(() => {
     api.getSyncToken().then(d => { setToken(d.sync_token || ''); setHasToken(d.has_token); }).catch(() => {});
     api.getSyncStatus().then(setStatus).catch(() => {});
@@ -235,6 +237,20 @@ function ConnectorTokenSection() {
       setHasToken(true);
     } catch { /* silent */ }
     setRegenerating(false);
+  };
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      await api.downloadConnector(token);
+    } catch (err) {
+      console.error('Download error:', err);
+      // Fallback direct download link
+      const fallbackUrl = `/api/sync/connector.zip?token=${encodeURIComponent(token || '')}`;
+      window.location.href = fallbackUrl;
+    } finally {
+      setDownloading(false);
+    }
   };
 
   const masked = token ? token.slice(0, 8) + '••••••••' + token.slice(-4) : '—';
@@ -307,14 +323,14 @@ function ConnectorTokenSection() {
           style={{ fontSize: '0.78rem' }}>
           {regenerating ? 'Generating…' : hasToken ? '🔄 Regenerate Token' : '🔑 Generate Token'}
         </button>
-        <a 
-          href={`/api/sync/connector.zip?token=${encodeURIComponent(token || '')}`} 
-          download="tj-mt5-connector.zip"
+        <button 
+          onClick={handleDownload} 
+          disabled={downloading}
           className="btn btn-secondary"
-          style={{ fontSize: '0.78rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+          style={{ fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
         >
-          <span>📥</span> Download Connector (.zip)
-        </a>
+          <span>📥</span> {downloading ? 'Downloading...' : 'Download Connector (.zip)'}
+        </button>
         <span style={{ color: 'var(--text-2)', fontSize: '0.72rem', fontFamily: 'var(--mono)', width: '100%', marginTop: '4px' }}>
           {hasToken ? 'Regenerating will invalidate the old token.' : 'Generate a token to connect your local MT5 agent.'}
         </span>

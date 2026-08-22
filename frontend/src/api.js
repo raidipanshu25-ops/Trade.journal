@@ -200,6 +200,25 @@ export const api = {
   getSyncToken: () => apiFetch('/user/sync-token'),
   generateSyncToken: () => apiFetch('/user/sync-token', { method: 'POST' }),
   getSyncStatus: () => apiFetch('/sync/status'),
+  downloadConnector: async (token = '') => {
+    const auth = localStorage.getItem('tj-auth-token');
+    const headers = {};
+    if (auth) headers['Authorization'] = `Bearer ${auth}`;
+    const url = `${API_BASE}/sync/connector.zip?token=${encodeURIComponent(token || '')}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      throw new Error(`Download failed (${res.status}): ${res.statusText}`);
+    }
+    const blob = await res.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = 'tj-mt5-connector.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(blobUrl);
+  },
 
   // Public config
   getConfig: () => apiFetch('/config'),

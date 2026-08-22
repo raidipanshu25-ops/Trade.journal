@@ -300,10 +300,25 @@ async def check_auth_middleware(request: Request, call_next):
         return await call_next(request)
     
     path = request.url.path
-    public_paths = ["/api/auth/login", "/api/auth/google", "/api/auth/register", "/api/health", "/api/config", "/api/sync/auth", "/api/sync/push"]
+    public_paths = [
+        "/api/auth/login",
+        "/api/auth/google",
+        "/api/auth/register",
+        "/api/health",
+        "/api/config",
+        "/api/sync/auth",
+        "/api/sync/push",
+        "/api/sync/connector.zip",
+        "/api/download-connector",
+        "/connector.zip",
+    ]
     
     if path.startswith("/api/") and path not in public_paths:
-        if path.startswith("/api/chart/image/"):
+        if (
+            path.startswith("/api/chart/image/")
+            or path.startswith("/api/sync/connector.zip")
+            or path.startswith("/api/download-connector")
+        ):
             pass
         else:
             auth_header = request.headers.get("Authorization")
@@ -2039,10 +2054,13 @@ def generate_connector_zip(sync_token: str = "", backend_url: str = "") -> bytes
     """Generate a zip package containing MT5 local sync agent and setup files."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        # 1. local_sync_agent.py
+        # 1. local_sync_agent.py & connector_config.py
         agent_path = Path(__file__).parent / "local_sync_agent.py"
         if agent_path.exists():
             zf.writestr("local_sync_agent.py", agent_path.read_text(encoding="utf-8"))
+        cfg_path = Path(__file__).parent / "connector_config.py"
+        if cfg_path.exists():
+            zf.writestr("connector_config.py", cfg_path.read_text(encoding="utf-8"))
         
         # 2. requirements.txt
         req_path = Path(__file__).parent / "requirements_local.txt"

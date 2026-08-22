@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { api } from '../api';
 
 export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip }) {
   const [step, setStep] = useState(1);
   const [copied, setCopied] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     // If it becomes connected while on step 4, we stay on step 4 which now shows success
@@ -13,6 +15,18 @@ export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip })
       navigator.clipboard.writeText(syncToken);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleDownloadConnector = async () => {
+    setDownloading(true);
+    try {
+      await api.downloadConnector(syncToken);
+    } catch (err) {
+      console.error('Download error:', err);
+      window.location.href = `/api/sync/connector.zip?token=${encodeURIComponent(syncToken || '')}`;
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -224,14 +238,15 @@ export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip })
                 <li>
                   <div><strong>Download & extract</strong> the MT5 Connector package:</div>
                   <div style={{ marginTop: '8px' }}>
-                    <a 
-                      href={`/api/sync/connector.zip?token=${encodeURIComponent(syncToken || '')}`} 
-                      download="tj-mt5-connector.zip"
+                    <button 
+                      onClick={handleDownloadConnector}
+                      disabled={downloading}
                       style={{ 
                         display: 'inline-flex', alignItems: 'center', gap: '8px',
                         padding: '9px 18px', background: 'var(--cyan-dim)', border: '1px solid var(--cyan-border)',
-                        borderRadius: '8px', color: 'var(--cyan)', fontWeight: 600, textDecoration: 'none',
-                        fontSize: '0.88rem', boxShadow: 'var(--cyan-glow-sm)', transition: 'all 0.2s'
+                        borderRadius: '8px', color: 'var(--cyan)', fontWeight: 600,
+                        fontSize: '0.88rem', boxShadow: 'var(--cyan-glow-sm)', transition: 'all 0.2s',
+                        cursor: downloading ? 'wait' : 'pointer'
                       }}
                       onMouseOver={(e) => e.currentTarget.style.background = 'rgba(0, 217, 163, 0.2)'}
                       onMouseOut={(e) => e.currentTarget.style.background = 'var(--cyan-dim)'}
@@ -241,8 +256,8 @@ export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip })
                         <polyline points="7 10 12 15 17 10" />
                         <line x1="12" y1="15" x2="12" y2="3" />
                       </svg>
-                      Download MT5 Connector (.zip)
-                    </a>
+                      {downloading ? 'Downloading...' : 'Download MT5 Connector (.zip)'}
+                    </button>
                   </div>
                 </li>
                 <li>
