@@ -20,10 +20,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
-import websockets
-from dotenv import load_dotenv
-import MetaTrader5 as mt5
+try:
+    import httpx
+    import websockets
+    from dotenv import load_dotenv
+    import MetaTrader5 as mt5
+except ImportError as e:
+    print("\n" + "=" * 60)
+    print(" [ERROR] Missing required Python package!")
+    print(f" Details: {e}")
+    print("\n Please install the required packages by running:")
+    print("   pip install MetaTrader5 httpx websockets python-dotenv")
+    print(" Or double-click 'run_connector.bat'")
+    print("=" * 60 + "\n")
+    try:
+        input("Press Enter to exit...")
+    except Exception:
+        pass
+    sys.exit(1)
 
 # ── Config location ──────────────────────────────────────────────────
 CONFIG_DIR = Path.home() / ".tj-connector"
