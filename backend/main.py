@@ -1004,9 +1004,9 @@ async def websocket_live(ws: WebSocket, token: str = None):
                 elif MT5_MODE == "sync":
                     # ── Sync mode: serve cached data from local agent (per-user) ──
                     user_sync = _get_user_sync_data(ws_user_id)
-                    hist_flag = _history_updated_flag
+                    hist_flag = user_sync.get("history_updated", False)
                     if hist_flag:
-                        _history_updated_flag = False
+                        user_sync["history_updated"] = False
                     snapshot = {
                         "connected": user_sync["connected"],
                         "account": user_sync["account"],
@@ -2056,6 +2056,7 @@ def _get_user_sync_data(user_id: int) -> dict:
             "last_sync": None,
             "last_live_update": None,
             "connected": False,
+            "history_updated": False,
         }
     return _sync_data[user_id]
 
@@ -2194,8 +2195,8 @@ foreach ($c in $candidates) {
     try {
         $parts = $c -split " "
         $exe = $parts[0]
-        $args = $parts[1..($parts.Length-1)]
-        $res = Start-Process -FilePath $exe -ArgumentList ($args + @("-c", "import sys")) -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+        $pyArgs = if ($parts.Length -gt 1) { $parts[1..($parts.Length-1)] } else { @() }
+        $res = Start-Process -FilePath $exe -ArgumentList ($pyArgs + @("-c", "import sys")) -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
         if ($res -and $res.ExitCode -eq 0) {
             $pythonCmd = $c
             break
@@ -2205,12 +2206,14 @@ foreach ($c in $candidates) {
 
 if (-not $pythonCmd) {
     $commonPaths = @(
-        "$env:LOCALAPPDATA\\Programs\\Python\\Python311\\python.exe",
-        "$env:LOCALAPPDATA\\Programs\\Python\\Python312\\python.exe",
-        "$env:LOCALAPPDATA\\Programs\\Python\\Python310\\python.exe",
-        "$env:LOCALAPPDATA\\Python\\bin\\python.exe",
-        "$env:ProgramFiles\\Python311\\python.exe",
-        "$env:ProgramFiles\\Python312\\python.exe"
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python314\python.exe",
+        "$env:LOCALAPPDATA\Python\bin\python.exe",
+        "$env:ProgramFiles\Python311\python.exe",
+        "$env:ProgramFiles\Python312\python.exe"
     )
     foreach ($p in $commonPaths) {
         if (Test-Path $p) {
@@ -2235,8 +2238,8 @@ Write-Host ""
 Write-Host "[2/2] Starting MT5 Sync Agent..." -ForegroundColor Green
 if (Test-Path "local_sync_agent.py") {
     Invoke-Expression "$pythonCmd local_sync_agent.py"
-} elseif (Test-Path "backend\\local_sync_agent.py") {
-    Invoke-Expression "$pythonCmd backend\\local_sync_agent.py"
+} elseif (Test-Path "backend\local_sync_agent.py") {
+    Invoke-Expression "$pythonCmd backend\local_sync_agent.py"
 } else {
     Write-Host "[ERROR] local_sync_agent.py not found!" -ForegroundColor Red
 }
@@ -2314,7 +2317,9 @@ def download_connector(token: str = None, request: Request = None):
     """Download the MT5 local connector package with optional pre-configured token."""
     backend_url = ""
     if request:
-        backend_url = f"{request.url.scheme}://{request.url.netloc}"
+        # Behind reverse proxies (Render, etc.), use X-Forwarded-Proto for the real scheme
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        backend_url = f"{scheme}://{request.url.netloc}"
     zip_bytes = generate_connector_zip(sync_token=token or "", backend_url=backend_url)
     return Response(
         content=zip_bytes,
@@ -2388,7 +2393,6 @@ async def sync_push(request: Request, payload: dict = Body(...)):
             raise HTTPException(401, "Invalid token")
         user_id = user_data.get("user_id", 0)
 
-    global _history_updated_flag
     user_sync = _get_user_sync_data(user_id)
 
     # Store account & positions
@@ -2425,7 +2429,7 @@ async def sync_push(request: Request, payload: dict = Body(...)):
             synced_count += 1
 
     if synced_count > 0:
-        _history_updated_flag = True
+        user_sync["history_updated"] = True
         _cache_invalidate("journal_stats")
         _cache_invalidate("analytics")
         logger.info(f"Sync push: {synced_count} trades synced for user {user_id}")

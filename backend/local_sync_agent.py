@@ -16,6 +16,7 @@ import sys
 import time
 import json
 import logging
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -42,6 +43,9 @@ except ImportError as e:
 # ── Config location ──────────────────────────────────────────────────
 CONFIG_DIR = Path.home() / ".tj-connector"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
+# ── Track whether this is the first sync (for full history pull) ─────
+_first_sync = True
 
 # ── Colored console output ───────────────────────────────────────────
 class Colors:
@@ -144,7 +148,7 @@ def auth_headers() -> dict:
     return {"Authorization": f"Bearer {_jwt_token}"} if _jwt_token else {}
 
 
-import subprocess
+# (subprocess imported at top of file)
 
 def auto_detect_mt5_path() -> str:
     """Find terminal64.exe across environment, registry, and standard/broker directories."""
@@ -276,8 +280,15 @@ def ensure_mt5_gui_running(mt5_path: str = "") -> bool:
 
 
 # ── MT5 Functions ────────────────────────────────────────────────────
-def connect_mt5(mt5_path=None):
-    """Connect to MT5 terminal with retries and auto-launch GUI."""
+def connect_mt5(mt5_path=None, max_retries: int = 0):
+    """Connect to MT5 terminal with retries and auto-launch GUI.
+
+    Args:
+        mt5_path: Path to terminal64.exe (auto-detected if None).
+        max_retries: Max retry attempts. 0 = infinite (used at startup).
+                     Use a finite number when called from async loops
+                     via asyncio.to_thread() to avoid blocking forever.
+    """
     if not mt5_path:
         mt5_path = auto_detect_mt5_path()
 
@@ -306,6 +317,9 @@ def connect_mt5(mt5_path=None):
         else:
             retry_count += 1
             print_error(f"Failed to connect to MT5 (attempt {retry_count}). Error: {mt5.last_error()}.")
+            if max_retries and retry_count >= max_retries:
+                print_warning(f"Giving up after {max_retries} attempts.")
+                return False
             if retry_count % 3 == 0 and mt5_path:
                 print_status("Attempting to launch MT5 GUI terminal...")
                 ensure_mt5_gui_running(mt5_path)
@@ -335,9 +349,9 @@ def get_open_positions():
         return []
 
     result = []
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     for p in positions:
-        open_time = datetime.fromtimestamp(p.time)
+        open_time = datetime.fromtimestamp(p.time, tz=timezone.utc)
         duration_minutes = (now - open_time).total_seconds() / 60.0
         result.append({
             "ticket": p.ticket,
@@ -356,16 +370,23 @@ def get_open_positions():
     return result
 
 def get_closed_trades():
+    global _first_sync
     open_positions = mt5.positions_get()
     open_pids = set(p.identifier for p in open_positions) if open_positions else set()
 
     now = datetime.now()
-    from_date = now - timedelta(days=7)
+    # On first sync, pull 90 days of history; subsequent syncs pull 7 days
+    lookback_days = 90 if _first_sync else 7
+    from_date = now - timedelta(days=lookback_days)
     deals = mt5.history_deals_get(from_date, now)
 
     if deals is None:
         print_error(f"Failed to get history deals: {mt5.last_error()}")
         return []
+
+    if _first_sync:
+        print_status(f"First sync: pulling {lookback_days} days of history ({len(deals)} deals found).")
+        _first_sync = False
 
     deals_by_pid = {}
     for d in deals:
@@ -398,10 +419,24 @@ def get_closed_trades():
         commission = in_deal.commission + sum(d.commission for d in data['outs'])
         swap = in_deal.swap + sum(d.swap for d in data['outs'])
 
-        open_time = datetime.fromtimestamp(in_deal.time)
+        open_time = datetime.fromtimestamp(in_deal.time, tz=timezone.utc)
         last_out = sorted(data['outs'], key=lambda x: x.time)[-1]
-        close_time = datetime.fromtimestamp(last_out.time)
+        close_time = datetime.fromtimestamp(last_out.time, tz=timezone.utc)
         duration_minutes = (close_time - open_time).total_seconds() / 60.0
+
+        # Retrieve SL/TP from order history for this position
+        sl_val, tp_val = 0.0, 0.0
+        try:
+            orders = mt5.history_orders_get(position=pid)
+            if orders:
+                # Use the original entry order's SL/TP
+                for o in orders:
+                    if o.type in (0, 1):  # ORDER_TYPE_BUY or ORDER_TYPE_SELL
+                        sl_val = o.sl if o.sl else 0.0
+                        tp_val = o.tp if o.tp else 0.0
+                        break
+        except Exception:
+            pass
 
         closed_trades.append({
             "position_id": pid,
@@ -416,8 +451,8 @@ def get_closed_trades():
             "profit": profit,
             "commission": commission,
             "swap": swap,
-            "sl": 0.0,
-            "tp": 0.0,
+            "sl": sl_val,
+            "tp": tp_val,
             "duration_minutes": duration_minutes
         })
 
@@ -433,17 +468,17 @@ async def bulk_sync_loop(backend_url: str, sync_token: str):
             try:
                 if mt5.terminal_info() is None:
                     print_warning("MT5 disconnected. Reconnecting...")
-                    connect_mt5()
+                    await asyncio.to_thread(connect_mt5, None, 3)
 
                 token = await authenticate(client, backend_url, sync_token)
 
-                account = get_account_info()
+                account = await asyncio.to_thread(get_account_info)
                 if not account:
                     await asyncio.sleep(5)
                     continue
 
-                positions = get_open_positions()
-                closed_trades = get_closed_trades()
+                positions = await asyncio.to_thread(get_open_positions)
+                closed_trades = await asyncio.to_thread(get_closed_trades)
 
                 response = await client.post(
                     f"{backend_url}/api/sync/push",
@@ -481,40 +516,49 @@ async def live_stream_loop(backend_url: str, sync_token: str):
 
     print_status("Starting live stream loop (every 2s)...")
 
-    while True:
-        try:
-            # Get fresh JWT for WebSocket auth
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                token = await authenticate(client, backend_url, sync_token)
+    # Reuse a single httpx client for auth refreshes
+    http_client = httpx.AsyncClient(timeout=10.0)
 
-            ws_url = f"{ws_scheme}://{parsed.netloc}/ws/sync/agent?token={token}"
+    try:
+        while True:
+            try:
+                # Get fresh JWT for WebSocket auth
+                token = await authenticate(http_client, backend_url, sync_token)
 
-            async with websockets.connect(ws_url) as websocket:
-                print_success("WebSocket connected.")
-                while True:
-                    if mt5.terminal_info() is None:
-                        print_warning("MT5 disconnected. Reconnecting...")
-                        connect_mt5()
+                ws_url = f"{ws_scheme}://{parsed.netloc}/ws/sync/agent?token={token}"
 
-                    account = get_account_info()
-                    positions = get_open_positions()
+                async with websockets.connect(
+                    ws_url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                ) as websocket:
+                    print_success("WebSocket connected.")
+                    while True:
+                        if mt5.terminal_info() is None:
+                            print_warning("MT5 disconnected. Reconnecting...")
+                            await asyncio.to_thread(connect_mt5, None, 3)
 
-                    if account:
-                        await websocket.send(json.dumps({
-                            "type": "live_update",
-                            "timestamp": datetime.now().astimezone().isoformat(),
-                            "account": account,
-                            "positions": positions
-                        }))
+                        account = await asyncio.to_thread(get_account_info)
+                        positions = await asyncio.to_thread(get_open_positions)
 
-                    await asyncio.sleep(2)
+                        if account:
+                            await websocket.send(json.dumps({
+                                "type": "live_update",
+                                "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+                                "account": account,
+                                "positions": positions
+                            }))
 
-        except websockets.exceptions.ConnectionClosed:
-            print_error("WebSocket closed. Reconnecting in 5s...")
-        except Exception as e:
-            print_error(f"WebSocket error: {e}. Reconnecting in 5s...")
+                        await asyncio.sleep(2)
 
-        await asyncio.sleep(5)
+            except websockets.exceptions.ConnectionClosed:
+                print_error("WebSocket closed. Reconnecting in 5s...")
+            except Exception as e:
+                print_error(f"WebSocket error: {e}. Reconnecting in 5s...")
+
+            await asyncio.sleep(5)
+    finally:
+        await http_client.aclose()
 
 
 # ── Main ─────────────────────────────────────────────────────────────
