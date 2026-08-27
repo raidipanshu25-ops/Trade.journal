@@ -127,11 +127,18 @@ def run_setup_wizard() -> dict:
 _jwt_token = None
 _jwt_expiry = 0
 
+def invalidate_jwt():
+    """Clear cached JWT so the next authenticate() call fetches a fresh one."""
+    global _jwt_token, _jwt_expiry
+    _jwt_token = None
+    _jwt_expiry = 0
+
+
 async def authenticate(client: httpx.AsyncClient, backend_url: str, sync_token: str) -> str:
     """Exchange sync_token for a JWT. Caches the token."""
     global _jwt_token, _jwt_expiry
 
-    if _jwt_token and time.time() < _jwt_expiry - 60:
+    if _jwt_token and time.time() < _jwt_expiry - 30:
         return _jwt_token
 
     response = await client.post(
@@ -141,8 +148,8 @@ async def authenticate(client: httpx.AsyncClient, backend_url: str, sync_token: 
     response.raise_for_status()
     data = response.json()
     _jwt_token = data["token"]
-    # JWT typically valid for hours; re-auth every 30 min to be safe
-    _jwt_expiry = time.time() + 1800
+    # Re-auth every 5 minutes to stay resilient to backend restarts
+    _jwt_expiry = time.time() + 300
     print_success("Authenticated with backend.")
     return _jwt_token
 
@@ -501,9 +508,13 @@ async def bulk_sync_loop(backend_url: str, sync_token: str):
 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 401:
-                    print_warning("Auth expired. Re-authenticating...")
-                    global _jwt_token
-                    _jwt_token = None
+                    print_warning("Auth expired or backend restarted. Re-authenticating...")
+                    invalidate_jwt()
+                    try:
+                        await authenticate(client, backend_url, sync_token)
+                        print_success("Re-authenticated successfully.")
+                    except Exception as auth_err:
+                        print_error(f"Re-auth failed: {auth_err}. Will retry next cycle.")
                 else:
                     print_error(f"HTTP error: {e.response.status_code} {e.response.text}")
             except Exception as e:
@@ -554,10 +565,17 @@ async def live_stream_loop(backend_url: str, sync_token: str):
 
                         await asyncio.sleep(2)
 
-            except websockets.exceptions.ConnectionClosed:
-                print_error("WebSocket closed. Reconnecting in 5s...")
+            except websockets.exceptions.ConnectionClosed as e:
+                # Connection closed often means backend restarted (new SECRET_KEY)
+                print_error(f"WebSocket closed (code={getattr(e, 'code', '?')}). Invalidating JWT and reconnecting in 5s...")
+                invalidate_jwt()
             except Exception as e:
-                print_error(f"WebSocket error: {e}. Reconnecting in 5s...")
+                err_str = str(e).lower()
+                if "401" in err_str or "forbidden" in err_str or "unauthorized" in err_str:
+                    print_warning("WebSocket auth rejected. Backend may have restarted. Re-authenticating...")
+                    invalidate_jwt()
+                else:
+                    print_error(f"WebSocket error: {e}. Reconnecting in 5s...")
 
             await asyncio.sleep(5)
     finally:

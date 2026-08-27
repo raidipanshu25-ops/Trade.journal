@@ -1,49 +1,301 @@
 """
-SQLite database for persisting alerts and analysis history.
+SQLite / PostgreSQL database for persisting alerts and analysis history.
+Supports both SQLite (local dev) and PostgreSQL (cloud deployment).
 """
 import sqlite3
 import json
+import os
+import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 from config import get_local_tz
 
+_log = logging.getLogger(__name__)
+
 DB_PATH = Path(__file__).parent / "trading_journal.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+_use_pg = bool(DATABASE_URL)
+
+if _use_pg:
+    try:
+        import psycopg2
+        import psycopg2.extras
+        _log.info("PostgreSQL mode enabled (DATABASE_URL is set).")
+    except ImportError:
+        _log.warning("psycopg2 not installed — falling back to SQLite.")
+        _use_pg = False
+
+
+def _q(query: str) -> str:
+    """Convert SQLite ? placeholders to PostgreSQL %s."""
+    if not _use_pg:
+        return query
+    # Replace ? with %s, but skip ?? and ?-inside-strings
+    # Simple approach: direct replacement works because none of our queries use ? in strings
+    return query.replace("?", "%s")
+
+
+def _adapt_insert(query: str) -> str:
+    """Convert SQLite INSERT OR IGNORE/REPLACE to PostgreSQL syntax."""
+    if not _use_pg:
+        return query
+    if "INSERT OR IGNORE" in query:
+        query = query.replace("INSERT OR IGNORE", "INSERT")
+        query = query.rstrip().rstrip(";")
+        query += " ON CONFLICT DO NOTHING"
+    elif "INSERT OR REPLACE" in query:
+        query = query.replace("INSERT OR REPLACE", "INSERT")
+        query = query.rstrip().rstrip(";")
+        # For daily_snapshots which uses INSERT OR REPLACE
+        # Since we DELETE first then INSERT, just remove the OR REPLACE
+    return query
+
+
+class _PgCursorWrapper:
+    """Makes psycopg2 cursor behave like sqlite3 cursor."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self._lastrowid = None
+
+    def execute(self, query, params=None):
+        query = _adapt_insert(_q(query))
+        if params:
+            self._cursor.execute(query, params)
+        else:
+            self._cursor.execute(query)
+        # Capture lastrowid for INSERT ... RETURNING id
+        if query.strip().upper().startswith("INSERT") and self._cursor.description:
+            try:
+                row = self._cursor.fetchone()
+                if row and 'id' in row:
+                    self._lastrowid = row['id']
+            except Exception:
+                pass
+        return self
+
+    def executemany(self, query, params_list):
+        query = _adapt_insert(_q(query))
+        for params in params_list:
+            try:
+                self._cursor.execute(query, params)
+            except Exception:
+                pass  # Skip duplicates (ON CONFLICT DO NOTHING)
+
+    def executescript(self, script):
+        """Execute multiple SQL statements (PostgreSQL doesn't have executescript)."""
+        for stmt in script.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                self._cursor.execute(stmt)
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    @property
+    def lastrowid(self):
+        return self._lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+
+class _PgConnectionWrapper:
+    """Makes psycopg2 connection behave like sqlite3 connection."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return _PgCursorWrapper(self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor))
+
+    def execute(self, query, params=None):
+        cur = self.cursor()
+        cur.execute(query, params)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
 
 def get_connection():
-    """Open a SQLite connection with performance PRAGMAs pre-applied.
+    """Open a database connection.
 
-    WAL mode allows concurrent readers and a single writer without
-    blocking, which is critical for the WebSocket tick loop.
+    Uses PostgreSQL when DATABASE_URL is set (cloud deployment),
+    otherwise falls back to SQLite (local development).
     """
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    # Performance tuning — applied once per connection
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")   # safe + fast
-    conn.execute("PRAGMA cache_size=-8000")      # 8 MB page cache
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.execute("PRAGMA mmap_size=134217728")   # 128 MB mmap
-    return conn
+    if _use_pg:
+        conn = psycopg2.connect(DATABASE_URL)
+        return _PgConnectionWrapper(conn)
+    else:
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        # Performance tuning — applied once per connection
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")   # safe + fast
+        conn.execute("PRAGMA cache_size=-8000")      # 8 MB page cache
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA mmap_size=134217728")   # 128 MB mmap
+        return conn
 
 
 def init_db():
     """Create tables if they don't exist."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+    
+    if _use_pg:
+        _init_pg_tables(cursor)
+    else:
+        cursor.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                email TEXT UNIQUE,
+                password_hash TEXT,
+                role TEXT DEFAULT 'user',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mt5_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                login INTEGER NOT NULL,
+                password TEXT NOT NULL,
+                server TEXT NOT NULL,
+                metaapi_account_id TEXT,
+                state TEXT DEFAULT 'DEPLOYING',
+                connection_status TEXT DEFAULT 'DISCONNECTED',
+                created_at TEXT NOT NULL,
+                UNIQUE(login, server)
+            );
+
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                rule TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details TEXT DEFAULT '',
+                acknowledged INTEGER DEFAULT 0,
+                date TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ai_analyses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                analysis_text TEXT NOT NULL,
+                daily_stats TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT UNIQUE NOT NULL,
+                stats_json TEXT NOT NULL,
+                score INTEGER DEFAULT 100,
+                total_violations INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket INTEGER NOT NULL,
+                order_id INTEGER,
+                position_id INTEGER DEFAULT 0,
+                symbol TEXT NOT NULL,
+                type TEXT NOT NULL,
+                volume REAL NOT NULL,
+                open_price REAL,
+                close_price REAL,
+                profit REAL NOT NULL,
+                commission REAL DEFAULT 0,
+                swap REAL DEFAULT 0,
+                open_time TEXT,
+                close_time TEXT NOT NULL,
+                duration_minutes REAL DEFAULT 0,
+                comment TEXT DEFAULT '',
+                date TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(ticket)
+            );
+
+            CREATE TABLE IF NOT EXISTS chart_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                image_path TEXT NOT NULL,
+                image_hash TEXT UNIQUE,
+                context TEXT DEFAULT '',
+                symbol TEXT DEFAULT '',
+                timeframe TEXT DEFAULT '',
+                analysis_status TEXT DEFAULT 'pending',
+                chart_patterns TEXT DEFAULT '[]',
+                support_resistance TEXT DEFAULT '[]',
+                trend_direction TEXT DEFAULT '',
+                annotations_detected TEXT DEFAULT '[]',
+                price_action TEXT DEFAULT '',
+                trade_setup TEXT DEFAULT '',
+                full_analysis TEXT DEFAULT '',
+                linked_ticket INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+        """)
+        # Performance indexes — must be created AFTER tables exist
+        cursor.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_trade_date
+                ON trade_history(date);
+            CREATE INDEX IF NOT EXISTS idx_trade_symbol
+                ON trade_history(symbol);
+            CREATE INDEX IF NOT EXISTS idx_trade_close_time
+                ON trade_history(close_time);
+            CREATE INDEX IF NOT EXISTS idx_alerts_date
+                ON alerts(date);
+            CREATE INDEX IF NOT EXISTS idx_ai_analyses_date
+                ON ai_analyses(date);
+            CREATE INDEX IF NOT EXISTS idx_chart_date
+                ON chart_snapshots(date);
+        """)
+    conn.commit()
+    conn.close()
+
+    # Live-migrate: add position_id column to existing databases
+    _migrate_add_position_id()
+    _migrate_auth_tables()
+    _migrate_multi_user()
+
+
+def _init_pg_tables(cursor):
+    """Create PostgreSQL tables (uses SERIAL instead of AUTOINCREMENT)."""
+    stmts = [
+        """CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
             username TEXT UNIQUE,
             email TEXT UNIQUE,
             password_hash TEXT,
             role TEXT DEFAULT 'user',
             created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS mt5_accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS mt5_accounts (
+            id SERIAL PRIMARY KEY,
             user_id INTEGER,
             login INTEGER NOT NULL,
             password TEXT NOT NULL,
@@ -53,10 +305,9 @@ def init_db():
             connection_status TEXT DEFAULT 'DISCONNECTED',
             created_at TEXT NOT NULL,
             UNIQUE(login, server)
-        );
-
-        CREATE TABLE IF NOT EXISTS alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS alerts (
+            id SERIAL PRIMARY KEY,
             timestamp TEXT NOT NULL,
             rule TEXT NOT NULL,
             severity TEXT NOT NULL,
@@ -64,27 +315,25 @@ def init_db():
             details TEXT DEFAULT '',
             acknowledged INTEGER DEFAULT 0,
             date TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS ai_analyses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS ai_analyses (
+            id SERIAL PRIMARY KEY,
             date TEXT NOT NULL,
             analysis_text TEXT NOT NULL,
             daily_stats TEXT,
             created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS daily_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT UNIQUE NOT NULL,
+        )""",
+        """CREATE TABLE IF NOT EXISTS daily_snapshots (
+            id SERIAL PRIMARY KEY,
+            date TEXT NOT NULL,
             stats_json TEXT NOT NULL,
             score INTEGER DEFAULT 100,
             total_violations INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS trade_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            UNIQUE(date)
+        )""",
+        """CREATE TABLE IF NOT EXISTS trade_history (
+            id SERIAL PRIMARY KEY,
             ticket INTEGER NOT NULL,
             order_id INTEGER,
             position_id INTEGER DEFAULT 0,
@@ -103,10 +352,9 @@ def init_db():
             date TEXT NOT NULL,
             created_at TEXT NOT NULL,
             UNIQUE(ticket)
-        );
-
-        CREATE TABLE IF NOT EXISTS chart_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""",
+        """CREATE TABLE IF NOT EXISTS chart_snapshots (
+            id SERIAL PRIMARY KEY,
             date TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             image_path TEXT NOT NULL,
@@ -124,30 +372,17 @@ def init_db():
             full_analysis TEXT DEFAULT '',
             linked_ticket INTEGER DEFAULT 0,
             created_at TEXT NOT NULL
-        );
-    """)
-    # Performance indexes — must be created AFTER tables exist
-    cursor.executescript("""
-        CREATE INDEX IF NOT EXISTS idx_trade_date
-            ON trade_history(date);
-        CREATE INDEX IF NOT EXISTS idx_trade_symbol
-            ON trade_history(symbol);
-        CREATE INDEX IF NOT EXISTS idx_trade_close_time
-            ON trade_history(close_time);
-        CREATE INDEX IF NOT EXISTS idx_alerts_date
-            ON alerts(date);
-        CREATE INDEX IF NOT EXISTS idx_ai_analyses_date
-            ON ai_analyses(date);
-        CREATE INDEX IF NOT EXISTS idx_chart_date
-            ON chart_snapshots(date);
-    """)
-    conn.commit()
-    conn.close()
-
-    # Live-migrate: add position_id column to existing databases
-    _migrate_add_position_id()
-    _migrate_auth_tables()
-    _migrate_multi_user()
+        )""",
+        # Indexes
+        "CREATE INDEX IF NOT EXISTS idx_trade_date ON trade_history(date)",
+        "CREATE INDEX IF NOT EXISTS idx_trade_symbol ON trade_history(symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_trade_close_time ON trade_history(close_time)",
+        "CREATE INDEX IF NOT EXISTS idx_alerts_date ON alerts(date)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_analyses_date ON ai_analyses(date)",
+        "CREATE INDEX IF NOT EXISTS idx_chart_date ON chart_snapshots(date)",
+    ]
+    for stmt in stmts:
+        cursor.execute(stmt)
 
 
 def _migrate_add_position_id():
@@ -827,11 +1062,16 @@ def save_chart_snapshot(data: dict, user_id: int = 0) -> int:
     """Save a chart snapshot and return its ID."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
+    insert_sql = (
         "INSERT INTO chart_snapshots "
         "(date, timestamp, image_path, image_hash, context, symbol, timeframe, "
         "analysis_status, linked_ticket, created_at, user_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    if _use_pg:
+        insert_sql += " RETURNING id"
+    cursor.execute(
+        insert_sql,
         (
             data["date"],
             data["timestamp"],
@@ -846,7 +1086,11 @@ def save_chart_snapshot(data: dict, user_id: int = 0) -> int:
             user_id,
         )
     )
-    snapshot_id = cursor.lastrowid
+    if _use_pg:
+        row = cursor.fetchone()
+        snapshot_id = row['id'] if row else None
+    else:
+        snapshot_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return snapshot_id
@@ -1646,15 +1890,22 @@ def create_user(username: str, email: str, password_hash: str, role: str = 'user
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        insert_sql = (
+            "INSERT INTO users (username, email, password_hash, role, created_at) "
+            "VALUES (?, ?, ?, ?, ?)"
+        )
+        if _use_pg:
+            insert_sql += " RETURNING id"
         cursor.execute(
-            """
-            INSERT INTO users (username, email, password_hash, role, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
+            insert_sql,
             (username, email, password_hash, role, datetime.now(get_local_tz()).isoformat())
         )
         conn.commit()
-        user_id = cursor.lastrowid
+        if _use_pg:
+            row = cursor.fetchone()
+            user_id = row['id'] if row else None
+        else:
+            user_id = cursor.lastrowid
     except Exception as e:
         conn.close()
         raise e
@@ -1789,13 +2040,22 @@ def add_mt5_account(user_id: int, login: int, password: str, server: str, metaap
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute(
+        insert_sql = (
             "INSERT INTO mt5_accounts (user_id, login, password, server, metaapi_account_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        if _use_pg:
+            insert_sql += " RETURNING id"
+        cursor.execute(
+            insert_sql,
             (user_id, login, password, server, metaapi_account_id, datetime.now(timezone.utc).isoformat())
         )
         conn.commit()
-        account_id = cursor.lastrowid
+        if _use_pg:
+            row = cursor.fetchone()
+            account_id = row['id'] if row else None
+        else:
+            account_id = cursor.lastrowid
         cursor.execute("SELECT * FROM mt5_accounts WHERE id = ?", (account_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
@@ -1869,6 +2129,9 @@ def get_sync_token(user_id: int) -> str:
 
 def backup_db(max_backups: int = 7) -> str | None:
     """Create a consistent online SQLite backup and rotate older backups."""
+    if _use_pg:
+        _log.info("Backup skipped — PostgreSQL is managed by the cloud provider.")
+        return None
     if not DB_PATH.exists():
         return None
 

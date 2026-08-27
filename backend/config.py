@@ -168,15 +168,55 @@ MT5_PATH = os.getenv("MT5_PATH", "")
 # Sync agent authentication key (used when MT5_MODE == "sync")
 SYNC_API_KEY = os.getenv("SYNC_API_KEY", "")
 
+# Database: set DATABASE_URL to a PostgreSQL connection string for persistent cloud storage.
+# Leave blank to use local SQLite (default for development).
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
 # Authentication config
 import secrets
 
+def _is_cloud_platform() -> bool:
+    """Detect if running on a cloud platform with an ephemeral filesystem."""
+    cloud_env_vars = (
+        "RENDER", "RENDER_SERVICE_ID",       # Render
+        "RAILWAY_SERVICE_ID",                 # Railway
+        "FLY_APP_NAME",                       # Fly.io
+        "DYNO",                               # Heroku
+        "GOOGLE_CLOUD_PROJECT",               # GCP
+    )
+    return any(os.getenv(v) for v in cloud_env_vars)
+
+
 def _get_or_create_secret_key() -> str:
-    """Load SECRET_KEY or generate a persistent secure key in .env."""
+    """Load SECRET_KEY from environment. Only auto-generate for local dev.
+
+    On cloud platforms (Render, Railway, etc.) the filesystem is ephemeral,
+    so writing to .env won't persist across restarts.  If SECRET_KEY is not
+    set as a permanent environment variable, every restart would generate a
+    new key — invalidating all existing JWTs and breaking sync connectors.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
     key = os.getenv("SECRET_KEY", "").strip()
     if key and key != "tj-default-insecure-secret-key-change-in-production":
         return key
 
+    # --- Cloud platform: do NOT write to disk (it won't persist) -----------
+    if _is_cloud_platform():
+        _logger.critical(
+            "⛔ SECRET_KEY is not set in environment variables! "
+            "JWTs will be invalidated on every restart/redeploy. "
+            "Set SECRET_KEY in your hosting dashboard (e.g. Render → "
+            "Environment Variables) to a stable random value such as: %s",
+            secrets.token_hex(32),
+        )
+        # Generate an in-memory key so at least THIS process instance works
+        new_key = secrets.token_hex(32)
+        os.environ["SECRET_KEY"] = new_key
+        return new_key
+
+    # --- Local development: generate and persist to .env -------------------
     new_key = secrets.token_hex(32)
     env_file = Path(__file__).parent / ".env"
     try:
