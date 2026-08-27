@@ -32,7 +32,7 @@ function PasswordStrength({ password }) {
   );
 }
 
-export function LoginPage({ onLogin }) {
+export function LoginPage({ onLogin, onBack }) {
   const [mode, setMode] = useState('login');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
@@ -254,6 +254,14 @@ export function LoginPage({ onLogin }) {
               </button>
             </div>
           </form>
+        )}
+        {onBack && (
+          <div style={{ textAlign: 'center', marginTop: '20px' }}>
+            <button type="button" onClick={onBack}
+              style={{ background: 'none', border: 'none', color: 'var(--text-2)', cursor: 'pointer', fontSize: '0.82rem', fontFamily: 'inherit' }}>
+              ← Back to Home
+            </button>
+          </div>
         )}
       </div>
     </div>

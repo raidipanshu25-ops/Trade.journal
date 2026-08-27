@@ -7,6 +7,7 @@ import { AlertFeed } from './components/AlertFeed';
 import { TradesTable } from './components/TradesTable';
 import { AIPanel } from './components/AIPanel';
 import { LoginPage } from './components/LoginPage';
+import { LandingPage } from './components/LandingPage';
 import { MorningRitual } from './components/MorningRitual';
 import { PreTradeGate } from './components/PreTradeGate';
 import { PostTradeReflection } from './components/PostTradeReflection';
@@ -224,8 +225,15 @@ function App() {
     }
   }, [violationKey, lastViolationKey]);
 
+  // ── Landing / Login gate ────────────────────────────────────────
+  const [showLogin, setShowLogin] = useState(false);
+
+  if (!isAuthenticated && !showLogin) {
+    return <LandingPage onGetStarted={() => setShowLogin(true)} />;
+  }
+
   if (!isAuthenticated) {
-    return <LoginPage onLogin={() => setIsAuthenticated(true)} />;
+    return <LoginPage onLogin={() => setIsAuthenticated(true)} onBack={() => setShowLogin(false)} />;
   }
 
   if (ritualRequired) {
