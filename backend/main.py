@@ -2314,13 +2314,26 @@ def generate_user_sync_token(user=Depends(extract_user_from_token)):
 @app.get("/api/download-connector")
 @app.get("/connector.zip")
 def download_connector(token: str = None, request: Request = None):
-    """Download the MT5 local connector package with optional pre-configured token."""
+    """Download the MT5 local connector package with the user's current sync token."""
+    # Always use the user's current DB token so zip and UI never diverge
+    sync_token = token or ""
+    try:
+        user = extract_user_from_token(request)
+        if user:
+            user_id = user.get("user_id", 0)
+            db_token = db.get_sync_token(user_id)
+            if not db_token and user_id:
+                db_token = db.generate_sync_token(user_id)
+            if db_token:
+                sync_token = db_token
+    except Exception:
+        pass  # Fall back to query param token if auth fails
+
     backend_url = ""
     if request:
-        # Behind reverse proxies (Render, etc.), use X-Forwarded-Proto for the real scheme
         scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
         backend_url = f"{scheme}://{request.url.netloc}"
-    zip_bytes = generate_connector_zip(sync_token=token or "", backend_url=backend_url)
+    zip_bytes = generate_connector_zip(sync_token=sync_token, backend_url=backend_url)
     return Response(
         content=zip_bytes,
         media_type="application/zip",
