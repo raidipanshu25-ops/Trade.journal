@@ -6,7 +6,7 @@ Reads trades and positions from MT5 and pushes them
 to your cloud Trading Journal dashboard.
 
 Setup:
-  1. pip install MetaTrader5 httpx websockets python-dotenv
+  1. pip install MetaTrader5 httpx websockets python-dotenv psutil
   2. Run: python local_sync_agent.py
   3. Follow the setup wizard on first run
 """
@@ -31,7 +31,7 @@ except ImportError as e:
     print(" [ERROR] Missing required Python package!")
     print(f" Details: {e}")
     print("\n Please install the required packages by running:")
-    print("   pip install MetaTrader5 httpx websockets python-dotenv")
+    print("   pip install MetaTrader5 httpx websockets python-dotenv psutil")
     print(" Or double-click 'run_connector.bat'")
     print("=" * 60 + "\n")
     try:
@@ -46,6 +46,10 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # ── Track whether this is the first sync (for full history pull) ─────
 _first_sync = True
+
+# ── Lock to prevent concurrent connect_mt5 calls from both loops ─────
+import threading
+_mt5_connect_lock = threading.Lock()
 
 # ── Colored console output ───────────────────────────────────────────
 class Colors:
@@ -296,33 +300,34 @@ def connect_mt5(mt5_path=None, max_retries: int = 0):
 
     retry_count = 0
     while True:
-        try:
-            mt5.shutdown()
-        except Exception:
-            pass
+        with _mt5_connect_lock:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
 
-        init_kwargs = {}
-        if mt5_path and Path(mt5_path).exists():
-            init_kwargs["path"] = mt5_path
+            init_kwargs = {}
+            if mt5_path and Path(mt5_path).exists():
+                init_kwargs["path"] = mt5_path
 
-        if mt5.initialize(**init_kwargs):
-            term_info = mt5.terminal_info()
-            company = getattr(term_info, "company", "MetaQuotes") if term_info else "MetaQuotes"
-            print_success(f"Connected to MT5 terminal ({company}).")
-            if mt5_path:
-                ensure_mt5_gui_running(mt5_path)
-            return True
-        else:
-            retry_count += 1
-            print_error(f"Failed to connect to MT5 (attempt {retry_count}). Error: {mt5.last_error()}.")
-            if max_retries and retry_count >= max_retries:
-                print_warning(f"Giving up after {max_retries} attempts.")
-                return False
-            if retry_count % 3 == 0 and mt5_path:
-                print_status("Attempting to launch MT5 GUI terminal...")
-                ensure_mt5_gui_running(mt5_path)
-            print_status("Retrying in 10s...")
-            time.sleep(10)
+            if mt5.initialize(**init_kwargs):
+                term_info = mt5.terminal_info()
+                company = getattr(term_info, "company", "MetaQuotes") if term_info else "MetaQuotes"
+                print_success(f"Connected to MT5 terminal ({company}).")
+                if mt5_path:
+                    ensure_mt5_gui_running(mt5_path)
+                return True
+            else:
+                retry_count += 1
+                print_error(f"Failed to connect to MT5 (attempt {retry_count}). Error: {mt5.last_error()}.")
+                if max_retries and retry_count >= max_retries:
+                    print_warning(f"Giving up after {max_retries} attempts.")
+                    return False
+                if retry_count % 3 == 0 and mt5_path:
+                    print_status("Attempting to launch MT5 GUI terminal...")
+                    ensure_mt5_gui_running(mt5_path)
+        print_status("Retrying in 10s...")
+        time.sleep(10)
 
 def get_account_info():
     acc = mt5.account_info()
@@ -464,7 +469,7 @@ async def bulk_sync_loop(backend_url: str, sync_token: str):
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
             try:
-                if mt5.terminal_info() is None:
+                if await asyncio.to_thread(mt5.terminal_info) is None:
                     print_warning("MT5 disconnected. Reconnecting...")
                     await asyncio.to_thread(connect_mt5, None, 3)
 
@@ -532,7 +537,7 @@ async def live_stream_loop(backend_url: str, sync_token: str):
                 ) as websocket:
                     print_success("WebSocket connected.")
                     while True:
-                        if mt5.terminal_info() is None:
+                        if await asyncio.to_thread(mt5.terminal_info) is None:
                             print_warning("MT5 disconnected. Reconnecting...")
                             await asyncio.to_thread(connect_mt5, None, 3)
 

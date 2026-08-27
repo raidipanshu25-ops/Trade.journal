@@ -2337,8 +2337,8 @@ async def sync_push(request: Request, payload: dict = Body(...)):
 
     if synced_count > 0:
         user_sync["history_updated"] = True
-        _cache_invalidate("journal_stats")
-        _cache_invalidate("analytics")
+        _cache_invalidate(f"journal_stats_{user_id}")
+        _cache_invalidate(f"analytics_{user_id}")
         logger.info(f"Sync push: {synced_count} trades synced for user {user_id}")
 
     return {
