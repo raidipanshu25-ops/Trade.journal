@@ -126,6 +126,9 @@ class _PgConnectionWrapper:
     def commit(self):
         self._conn.commit()
 
+    def rollback(self):
+        self._conn.rollback()
+
     def close(self):
         self._conn.close()
 
@@ -385,15 +388,27 @@ def _init_pg_tables(cursor):
         cursor.execute(stmt)
 
 
+def _safe_add_column(conn, cursor, table, col, typedef):
+    """Add a column if it doesn't exist, handling PostgreSQL transaction aborts."""
+    if _use_pg:
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typedef}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+    else:
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
+            conn.commit()
+        except Exception:
+            pass
+
+
 def _migrate_add_position_id():
     """Add position_id column + index to existing trade_history tables that pre-date this field."""
     conn = get_connection()
     cursor = conn.cursor()
-    try:
-        cursor.execute("ALTER TABLE trade_history ADD COLUMN position_id INTEGER DEFAULT 0")
-        conn.commit()
-    except Exception:
-        pass  # Column already exists — safe to ignore
+    _safe_add_column(conn, cursor, "trade_history", "position_id", "INTEGER DEFAULT 0")
     try:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_trade_position_id "
@@ -401,7 +416,8 @@ def _migrate_add_position_id():
         )
         conn.commit()
     except Exception:
-        pass
+        if _use_pg:
+            conn.rollback()
     finally:
         conn.close()
 
@@ -416,11 +432,7 @@ def _migrate_auth_tables():
         ("totp_enabled", "INTEGER DEFAULT 0"),
         ("status", "TEXT DEFAULT 'active'"),
     ]:
-        try:
-            cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
-            conn.commit()
-        except Exception:
-            pass
+        _safe_add_column(conn, cursor, "users", col, typedef)
     # Create sessions table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
@@ -441,7 +453,8 @@ def _migrate_auth_tables():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)")
         conn.commit()
     except Exception:
-        pass
+        if _use_pg:
+            conn.rollback()
     conn.close()
 
 
@@ -451,29 +464,23 @@ def _migrate_multi_user():
     cursor = conn.cursor()
     tables = ["trade_history", "alerts", "ai_analyses", "daily_snapshots", "chart_snapshots"]
     for table in tables:
-        try:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER DEFAULT 0")
-            conn.commit()
-        except Exception:
-            pass
+        _safe_add_column(conn, cursor, table, "user_id", "INTEGER DEFAULT 0")
         try:
             cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_user_id ON {table}(user_id)")
             conn.commit()
         except Exception:
-            pass
-            
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN sync_token TEXT DEFAULT ''")
-        conn.commit()
-    except Exception:
-        pass
-        
+            if _use_pg:
+                conn.rollback()
+
+    _safe_add_column(conn, cursor, "users", "sync_token", "TEXT DEFAULT ''")
+
     for table in tables:
         try:
             cursor.execute(f"UPDATE {table} SET user_id = 1 WHERE user_id = 0")
             conn.commit()
         except Exception:
-            pass
+            if _use_pg:
+                conn.rollback()
     conn.close()
 
 
