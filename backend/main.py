@@ -101,7 +101,6 @@ else:
 
 # ── Sync mode: per-user in-memory storage for data pushed by local agent ────
 _sync_data = {}  # keyed by user_id
-_sync_live_subscribers: list[WebSocket] = []  # dashboard clients listening for live updates
 
 # ------------------------------------------------------------------ #
 #  Global services

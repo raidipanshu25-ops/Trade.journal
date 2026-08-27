@@ -148,8 +148,6 @@ def auth_headers() -> dict:
     return {"Authorization": f"Bearer {_jwt_token}"} if _jwt_token else {}
 
 
-# (subprocess imported at top of file)
-
 def auto_detect_mt5_path() -> str:
     """Find terminal64.exe across environment, registry, and standard/broker directories."""
     env_path = os.environ.get("MT5_PATH", "").strip()
