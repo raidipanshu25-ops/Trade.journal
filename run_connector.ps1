@@ -11,8 +11,8 @@ foreach ($c in $candidates) {
     try {
         $parts = $c -split " "
         $exe = $parts[0]
-        $args = $parts[1..($parts.Length-1)]
-        $res = Start-Process -FilePath $exe -ArgumentList ($args + @("-c", "import sys")) -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+        $pyArgs = if ($parts.Length -gt 1) { $parts[1..($parts.Length-1)] } else { @() }
+        $res = Start-Process -FilePath $exe -ArgumentList ($pyArgs + @("-c", "import sys")) -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
         if ($res -and $res.ExitCode -eq 0) {
             $pythonCmd = $c
             break

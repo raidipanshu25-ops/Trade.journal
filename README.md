@@ -168,25 +168,67 @@ Taking one trade per session feels normal. The urge to overtrade is gone. You've
 
 ---
 
-## 🚀 Setup (5 Minutes)
+## 🚀 Setup Instructions (Step-by-Step)
 
-### Backend
+You can run Trade.journal completely locally on your machine, or deploy the web dashboard to the cloud and just run the MT5 connector locally. 
+
+### Prerequisites
+Before you start, make sure you have installed:
+1. **Python 3.11 or higher** (Ensure "Add Python to PATH" is checked during installation)
+2. **Node.js v18 or higher** (Includes npm)
+3. **MetaTrader 5** (For Windows)
+
+---
+
+### Option 1: One-Click Local Setup (Recommended)
+If you want to run everything (Frontend, Backend, and MT5 Connector) on your own Windows PC:
+
+1. **Download / Clone** this repository to your PC.
+2. Double-click the **`start_app.bat`** file in the root directory.
+   - *This will automatically detect Python, install all backend and frontend dependencies, and launch both servers.*
+3. A browser window will automatically open to `http://localhost:5173`.
+4. Go through the initial Onboarding Wizard to set up your account and sessions.
+5. In the wizard, select **"Local App"** mode. Your MT5 terminal will be automatically detected and monitored.
+
+---
+
+### Option 2: Cloud Deployment + Local Connector (Recommended for Cloud)
+If you deploy the backend to a cloud provider (like Render, Railway, or Heroku), your cloud server cannot directly access your desktop's MetaTrader 5 terminal. You need to run a lightweight local connector script on your PC:
+
+1. Open your deployed Trade.journal web dashboard.
+2. Complete the initial Onboarding Wizard and select **"Cloud Hosted"** mode, or navigate to **Settings -> MT5 Connector**.
+3. Click **"Download Connector (.zip)"**.
+4. Right-click the downloaded `.zip` file and select **Extract All...** to a permanent folder on your Windows PC (e.g., your Desktop or Documents folder).
+5. Open the extracted folder and double-click **`run_connector.bat`**. 
+   - *Alternatively, right-click `run_connector.ps1` and select "Run with PowerShell".*
+   - *If Windows SmartScreen/Defender shows a warning, click "More info" then "Run anyway".*
+   - *The script will automatically detect your Python installation, install required packages, and launch the MT5 Sync Agent.*
+6. Keep the black terminal window open in the background while you trade. It will securely stream live data and positions directly to your cloud dashboard!
+
+### Option 3: Manual Command Line Setup
+If you prefer running the commands yourself:
+
+**1. Start the Backend:**
 ```bash
 cd backend
 pip install -r requirements.txt
-python main.py
+python -m uvicorn main:app --reload
 ```
 
-### Frontend
+**2. Start the Frontend:**
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-MT5 is auto-detected. The Access Controller starts enforcing immediately. No configuration needed.
-
----
+**3. Start the MT5 Local Sync Agent (If running backend in cloud):**
+```bash
+# Get your Sync Token from the dashboard settings first
+cd backend
+pip install -r requirements_local.txt
+python local_sync_agent.py
+```
 
 <div align="center">
 
