@@ -15,10 +15,12 @@
   "manual_override": null,
   "override_initial_trades": 0,
   "total_entries": 0,
-  "last_checked": "2026-08-23T01:01:43.899280+05:30",
+  "last_checked": "2026-08-23T02:13:21.687704+05:30",
   "log": [
     "[00:24:50] \ud83c\udf05 New trading day started",
-    "[00:24:50] \ud83d\udd34 MT5 CLOSED \u2014 \u23f3 Outside of active trading sessions"
+    "[00:24:50] \ud83d\udd34 MT5 CLOSED \u2014 \u23f3 Outside of active trading sessions",
+    "[01:53:49] \ud83d\udd34 MT5 CLOSED \u2014 \u23f3 Outside of active trading sessions",
+    "[02:02:50] \ud83d\udd34 MT5 CLOSED \u2014 \u23f3 Outside of active trading sessions"
   ],
   "force_open_designated_session": null,
   "force_open_session": null,
