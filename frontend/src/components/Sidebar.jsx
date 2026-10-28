@@ -43,7 +43,7 @@ const icons = {
   ),
 };
 
-export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, alertCount, theme, onToggleTheme, currentUser, onLogout }) {
+export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, alertCount, theme, onToggleTheme, currentUser, onLogout, onShowLanding }) {
   const navItems = [
     { id: 'dashboard',        label: 'Dashboard',         icon: 'dashboard' },
     { id: 'trades',           label: 'Positions',         icon: 'trades' },
@@ -71,8 +71,8 @@ export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, ale
           </svg>
         </div>
         <div className="sidebar-brand-text">
-          <h1>Trading Journal</h1>
-          <span className="brand-tag">AI Analytics</span>
+          <h1>Trade.Journal</h1>
+          <span className="brand-tag">Trading Dashboard</span>
         </div>
       </div>
 
@@ -94,6 +94,27 @@ export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, ale
             )}
           </button>
         ))}
+
+        {onShowLanding && (
+          <div style={{ marginTop: 'auto', paddingTop: '10px' }}>
+            <button
+              className="nav-item"
+              onClick={onShowLanding}
+              id="nav-view-website"
+              title="View public website"
+              style={{ color: 'var(--text-1)' }}
+            >
+              <span className="nav-item-icon" style={{ opacity: 0.7 }}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  <polyline points="15 3 21 3 21 9"/>
+                  <line x1="10" y1="14" x2="21" y2="3"/>
+                </svg>
+              </span>
+              View Website
+            </button>
+          </div>
+        )}
       </nav>
 
       {/* Footer */}
@@ -106,7 +127,7 @@ export function Sidebar({ activePage, onNavigate, mt5Connected, aiAvailable, ale
             </div>
             <div className="connection-status" style={{ marginTop: '6px' }}>
               <div className={`connection-dot ${aiAvailable ? 'connected' : ''}`} />
-              <span>Z.ai {aiAvailable ? 'Ready' : 'No Key'}</span>
+              <span>AI Coach {aiAvailable ? 'Ready' : 'No Key'}</span>
             </div>
           </div>
           <button

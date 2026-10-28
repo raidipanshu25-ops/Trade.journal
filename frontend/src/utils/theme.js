@@ -4,6 +4,21 @@
 
 export const THEME_PRESETS = [
   {
+    id: 'fundedfirm',
+    name: 'FundedFirm',
+    desc: 'FundedFirm-inspired',
+    accent: '#01FFA6',
+    accentDark: '#00D98E',
+    bgBase: '#000000',
+    bgSurface: '#0A0A0A',
+    bgRaised: '#111111',
+    borderColor: '#1F1F1F',
+    textPrimary: '#FFFFFF',
+    textSecondary: '#A0A0A0',
+    profit: '#22C55E',
+    loss: '#EF4444',
+  },
+  {
     id: 'terminal-teal',
     name: 'Terminal Teal',
     desc: 'FundingPips-inspired',
@@ -91,7 +106,7 @@ export function hexToRgb(hex) {
 }
 
 export function applyThemePreset(presetId) {
-  if (!presetId) presetId = 'terminal-teal';
+  if (!presetId) presetId = 'fundedfirm';
 
   const el = document.documentElement;
 

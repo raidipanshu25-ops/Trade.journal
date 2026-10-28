@@ -5,44 +5,50 @@ Write-Host "============================================================" -Foreg
 Write-Host ""
 
 $pythonCmd = $null
-$candidates = @("py -3.11", "py -3.12", "py -3.10", "py -3", "py", "python")
+# 1. Check known direct install locations first
+$knownPaths = @(
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+    "$env:ProgramFiles\Python312\python.exe",
+    "$env:ProgramFiles\Python311\python.exe",
+    "$env:ProgramFiles\Python313\python.exe",
+    "$env:ProgramFiles\Python310\python.exe"
+)
 
-foreach ($c in $candidates) {
-    try {
-        $parts = $c -split " "
-        $exe = $parts[0]
-        $pyArgs = if ($parts.Length -gt 1) { $parts[1..($parts.Length-1)] } else { @() }
-        $res = Start-Process -FilePath $exe -ArgumentList ($pyArgs + @("-c", "import sys")) -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
-        if ($res -and $res.ExitCode -eq 0) {
-            $pythonCmd = $c
-            break
-        }
-    } catch {}
-}
-
-if (-not $pythonCmd) {
-    $commonPaths = @(
-        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python314\python.exe",
-        "$env:LOCALAPPDATA\Python\bin\python.exe",
-        "$env:LOCALAPPDATA\Python\pythoncore-3.14-64\python.exe",
-        "$env:ProgramFiles\Python311\python.exe",
-        "$env:ProgramFiles\Python312\python.exe"
-    )
-    foreach ($p in $commonPaths) {
-        if (Test-Path $p) {
+foreach ($p in $knownPaths) {
+    if (Test-Path $p) {
+        $pInfo = Start-Process -FilePath $p -ArgumentList '-c "import sys; sys.exit(0 if 10 <= sys.version_info[1] <= 14 else 1)"' -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+        if ($pInfo -and $pInfo.ExitCode -eq 0) {
             $pythonCmd = "`"$p`""
             break
         }
     }
 }
 
+# 2. Check py launcher versions
 if (-not $pythonCmd) {
-    Write-Host "[ERROR] Python 3.11+ is not found!" -ForegroundColor Red
-    Write-Host "Please install Python from https://www.python.org/ (Check 'Add Python to PATH')"
+    foreach ($ver in @("-3.12", "-3.11", "-3.10", "-3.13", "-3.14")) {
+        $pInfo = Start-Process -FilePath "py" -ArgumentList "$ver -c `"import sys; sys.exit(0 if 10 <= sys.version_info[1] <= 14 else 1)`"" -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+        if ($pInfo -and $pInfo.ExitCode -eq 0) {
+            $pythonCmd = "py $ver"
+            break
+        }
+    }
+}
+
+# 3. Check default python on PATH
+if (-not $pythonCmd) {
+    $pInfo = Start-Process -FilePath "python" -ArgumentList '-c "import sys; sys.exit(0 if 10 <= sys.version_info[1] <= 14 else 1)"' -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+    if ($pInfo -and $pInfo.ExitCode -eq 0) {
+        $pythonCmd = "python"
+    }
+}
+
+if (-not $pythonCmd) {
+    Write-Host "[ERROR] Compatible Python (3.10 - 3.14) was not found!" -ForegroundColor Red
+    Write-Host "MetaTrader 5 requires Python 3.10 - 3.14. Python 3.15+ is not yet supported by MT5."
     Read-Host "Press Enter to exit..."
     exit 1
 }

@@ -1467,6 +1467,132 @@ def get_ai_status():
     }
 
 
+def _update_env_file(updates: dict):
+    env_file = Path(__file__).parent / ".env"
+    existing_lines = []
+    if env_file.exists():
+        existing_lines = env_file.read_text(encoding="utf-8").splitlines()
+
+    seen = set()
+    new_lines = []
+    for line in existing_lines:
+        line_stripped = line.strip()
+        matched = False
+        for k, v in updates.items():
+            if line_stripped.startswith(f"{k}=") or line_stripped == k:
+                if v is not None:
+                    new_lines.append(f"{k}={v}")
+                seen.add(k)
+                matched = True
+                break
+        if not matched:
+            new_lines.append(line)
+
+    for k, v in updates.items():
+        if k not in seen and v is not None:
+            new_lines.append(f"{k}={v}")
+
+    env_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    for k, v in updates.items():
+        if v is not None:
+            os.environ[k] = str(v)
+
+
+@app.get("/api/settings/ai-config")
+def get_ai_config(user=Depends(extract_user_from_token)):
+    """Return currently configured AI provider settings and masked keys."""
+    agent_key = os.getenv("AGENTROUTER_API_KEY", "")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+
+    def mask(k):
+        if not k:
+            return ""
+        if len(k) <= 8:
+            return "••••••••"
+        return k[:4] + "••••••••" + k[-4:]
+
+    return {
+        "ai_provider": os.getenv("AI_PROVIDER", ""),
+        "ai_model": os.getenv("AI_MODEL", ""),
+        "vision_provider": os.getenv("VISION_PROVIDER", ""),
+        "vision_model": os.getenv("VISION_MODEL", ""),
+        "agentrouter": {
+            "configured": bool(agent_key),
+            "masked_key": mask(agent_key),
+            "base_url": os.getenv("AGENTROUTER_BASE_URL", "https://co.agentrouter.org/v1"),
+        },
+        "openrouter": {
+            "configured": bool(openrouter_key),
+            "masked_key": mask(openrouter_key),
+        },
+        "active_status": {
+            "analyzer": {
+                "available": ai.is_available,
+                "provider": ai.provider_name,
+                "model": ai.model_name,
+            },
+            "vision": {
+                "available": vision.is_available,
+                "vision_provider": vision.vision_provider,
+                "vision_model": vision._vision_model,
+                "coaching_provider": vision.coaching_provider,
+                "coaching_model": vision._coaching_model,
+            },
+        }
+    }
+
+
+@app.post("/api/settings/ai-config")
+def update_ai_config(body: dict, user=Depends(extract_user_from_token)):
+    """Update AI API keys, base URLs, and models; reload clients immediately."""
+    updates = {}
+    if "agentrouter_api_key" in body and body["agentrouter_api_key"].strip():
+        updates["AGENTROUTER_API_KEY"] = body["agentrouter_api_key"].strip()
+    if "agentrouter_base_url" in body and body["agentrouter_base_url"].strip():
+        updates["AGENTROUTER_BASE_URL"] = body["agentrouter_base_url"].strip()
+    if "openrouter_api_key" in body and body["openrouter_api_key"].strip():
+        updates["OPENROUTER_API_KEY"] = body["openrouter_api_key"].strip()
+    if "openai_api_key" in body and body["openai_api_key"].strip():
+        updates["OPENAI_API_KEY"] = body["openai_api_key"].strip()
+    if "gemini_api_key" in body and body["gemini_api_key"].strip():
+        updates["GEMINI_API_KEY"] = body["gemini_api_key"].strip()
+
+    if "ai_provider" in body:
+        updates["AI_PROVIDER"] = body["ai_provider"].strip()
+    if "ai_model" in body:
+        updates["AI_MODEL"] = body["ai_model"].strip()
+    if "vision_provider" in body:
+        updates["VISION_PROVIDER"] = body["vision_provider"].strip()
+    if "vision_model" in body:
+        updates["VISION_MODEL"] = body["vision_model"].strip()
+
+    if updates:
+        _update_env_file(updates)
+
+    # Re-initialize clients immediately with new configuration
+    ai._init_client()
+    vision._init_clients()
+
+    return {
+        "status": "ok",
+        "message": "AI configuration updated successfully",
+        "analyzer": {
+            "available": ai.is_available,
+            "provider": ai.provider_name,
+            "model": ai.model_name,
+        },
+        "vision": {
+            "available": vision.is_available,
+            "vision_provider": vision.vision_provider,
+            "vision_model": vision._vision_model,
+            "coaching_provider": vision.coaching_provider,
+            "coaching_model": vision._coaching_model,
+        },
+    }
+
+
 async def _process_ai_analysis(today: str, daily_stats: dict, positions: list[dict],
                                 alerts: list[dict], rules: dict, custom_prompt: str,
                                 journal_stats: dict, discipline_report: dict,

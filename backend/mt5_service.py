@@ -403,6 +403,11 @@ class MT5Service:
         """Fetch closed deals in a date range."""
         if not self.is_connected:
             return []
+        # Ensure naive datetimes without timezone offset for MT5 API
+        if hasattr(from_date, 'tzinfo') and from_date.tzinfo is not None:
+            from_date = from_date.replace(tzinfo=None)
+        if hasattr(to_date, 'tzinfo') and to_date.tzinfo is not None:
+            to_date = to_date.replace(tzinfo=None)
         deals = mt5.history_deals_get(from_date, to_date)
         if deals is None:
             return []

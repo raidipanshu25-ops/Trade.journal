@@ -9,6 +9,7 @@ import asyncio
 from openai import OpenAI
 from config import (
     AI_PROVIDER, AI_MODEL,
+    AGENTROUTER_API_KEY, AGENTROUTER_BASE_URL,
     ZAI_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY,
     OPENROUTER_API_KEY, GROQ_API_KEY, HF_API_KEY,
     NVIDIA_NIM_API_KEY,
@@ -240,19 +241,34 @@ Close with 2-3 sentence personal sign-off referencing something specific.
 Laws: Every statement backed by data. Emojis only in headers. If same leak repeats, call it a pattern."""
 
 
-# ─── Provider registry ───────────────────────────────────────────────
-# Each entry: (key_value, provider_name, base_url, default_model)
-# Providers are tried in order; first one with a non-empty key wins.
-_PROVIDERS = [
-    # (env_key,               name,             base_url,                                                  default_model)
-    (NVIDIA_NIM_API_KEY, "nvidia-nim",       "https://nim.api.nvidia.com/v1/",                              "DavidAU/Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-Claude-4.5-Opus-High-Reasoning"),
-    (GEMINI_API_KEY,     "gemini",           "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
-    (OPENAI_API_KEY,     "openai",           "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
-    (OPENROUTER_API_KEY, "openrouter",       "https://openrouter.ai/api/v1/",                               "openai/gpt-4o-mini"),
-    (HF_API_KEY,         "huggingface",      "https://router.huggingface.co/v1/",                           "DavidAU/Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-Claude-4.5-Opus-High-Reasoning:featherless-ai"),
-    (GROQ_API_KEY,       "groq",             "https://api.groq.com/openai/v1/",                             "llama-3.1-8b-instant"),
-    (ZAI_API_KEY,        "zai",              "https://api.z.ai/api/paas/v4/",                               "glm-4-flash"),
-]
+def _get_providers():
+    import os
+    from config import (
+        AGENTROUTER_API_KEY, AGENTROUTER_BASE_URL,
+        NVIDIA_NIM_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY,
+        OPENROUTER_API_KEY, HF_API_KEY, GROQ_API_KEY, ZAI_API_KEY,
+    )
+    # Check os.environ first in case dynamic update occurred
+    agent_key = os.getenv("AGENTROUTER_API_KEY", AGENTROUTER_API_KEY)
+    agent_url = os.getenv("AGENTROUTER_BASE_URL", AGENTROUTER_BASE_URL) or "https://agentrouter.org/v1/"
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", OPENROUTER_API_KEY)
+    openai_key = os.getenv("OPENAI_API_KEY", OPENAI_API_KEY)
+    gemini_key = os.getenv("GEMINI_API_KEY", GEMINI_API_KEY)
+    groq_key = os.getenv("GROQ_API_KEY", GROQ_API_KEY)
+    zai_key = os.getenv("ZAI_API_KEY", ZAI_API_KEY)
+    hf_key = os.getenv("HF_API_KEY", HF_API_KEY)
+    nvidia_key = os.getenv("NVIDIA_NIM_API_KEY", NVIDIA_NIM_API_KEY)
+
+    return [
+        (agent_key,      "agentrouter",      agent_url,                                                     "gpt-6-astra"),
+        (openrouter_key, "openrouter",       "https://openrouter.ai/api/v1/",                               "openai/gpt-4o-mini"),
+        (openai_key,     "openai",           "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
+        (gemini_key,     "gemini",           "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
+        (nvidia_key,     "nvidia-nim",       "https://nim.api.nvidia.com/v1/",                              "DavidAU/Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-Claude-4.5-Opus-High-Reasoning"),
+        (hf_key,         "huggingface",      "https://router.huggingface.co/v1/",                           "DavidAU/Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-Claude-4.5-Opus-High-Reasoning:featherless-ai"),
+        (groq_key,       "groq",             "https://api.groq.com/openai/v1/",                             "llama-3.1-8b-instant"),
+        (zai_key,        "zai",              "https://api.z.ai/api/paas/v4/",                               "glm-4-flash"),
+    ]
 
 
 class AIAnalyzer:
@@ -267,23 +283,96 @@ class AIAnalyzer:
 
     def _init_client(self):
         """Pick the first provider whose key is available (or the one set via AI_PROVIDER)."""
-        # If user explicitly set AI_PROVIDER, honour it
-        forced = AI_PROVIDER  # e.g. "gemini", "openai", etc.
-        for key_val, name, base_url, default_model in _PROVIDERS:
+        import os
+        from config import AI_PROVIDER, AI_MODEL
+        forced = os.getenv("AI_PROVIDER", AI_PROVIDER).lower().strip()
+        custom_model = os.getenv("AI_MODEL", AI_MODEL).strip()
+        providers = _get_providers()
+
+        for key_val, name, base_url, default_model in providers:
             if forced and name != forced:
                 continue
             if not key_val:
                 continue
             try:
-                self._client = OpenAI(api_key=key_val, base_url=base_url)
+                client_kwargs = {"api_key": key_val, "base_url": base_url}
+                if name == "agentrouter" or "agentrouter" in str(base_url).lower():
+                    client_kwargs["default_headers"] = {
+                        "User-Agent": "codex_cli_rs/0.149.1",
+                        "Originator": "codex_cli_rs",
+                    }
+                self._client = OpenAI(**client_kwargs)
                 self._provider_name = name
-                self._model = AI_MODEL or default_model
+                self._api_key = key_val
+                self._base_url = base_url
+
+                raw_model = custom_model or default_model
+                # Normalize aliases
+                m_low = raw_model.lower().strip()
+                if m_low in ("opus 4-8", "opus-4-8", "claude-opus-4-8", "opus4-8"):
+                    self._model = "claude-opus-5-5"
+                elif m_low in ("opus 5", "opus-5", "claude-opus-5", "opus5", "claude-opus-5-5", "opus 5-5"):
+                    self._model = "claude-opus-5-5"
+                elif m_low in ("gemini astra", "gemini-astra", "gpt-6-astra", "astra"):
+                    self._model = "gpt-6-astra"
+                elif m_low in ("deepseek", "deepseek-flash", "deepseek-v4-flash"):
+                    self._model = "deepseek-v4-flash"
+                elif m_low in ("sol", "gpt-6.1-sol"):
+                    self._model = "gpt-6.1-sol"
+                else:
+                    self._model = raw_model
+
                 logger.info(f"AIAnalyzer initialised: provider={name}, model={self._model}")
                 return
             except Exception as e:
                 logger.warning(f"AIAnalyzer: failed to init {name}: {e}")
 
+        self._client = None
+        self._provider_name = "none"
+        self._model = ""
+        self._api_key = ""
+        self._base_url = ""
         logger.warning("AIAnalyzer: no API key found for any provider — running in fallback mode.")
+
+    def _call_responses_endpoint(self, prompt_text: str, model: str = None) -> str:
+        """Call AgentRouter /v1/responses endpoint for models requiring OpenAI Responses API."""
+        import json, ssl, urllib.request, time
+        base = getattr(self, "_base_url", "https://agentrouter.org/v1/").rstrip("/")
+        if base.endswith("/v1"):
+            url = base + "/responses"
+        elif not base.endswith("/responses"):
+            url = base + "/v1/responses"
+        else:
+            url = base
+
+        req_model = model or getattr(self, "_model", "") or "gpt-6-astra"
+
+        headers = {
+            "Authorization": f"Bearer {getattr(self, '_api_key', '')}",
+            "User-Agent": "codex_cli_rs/0.149.1",
+            "Originator": "codex_cli_rs",
+            "Content-Type": "application/json"
+        }
+        payload = {"model": req_model, "input": prompt_text}
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        try:
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, context=ctx, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                for item in data.get("output", []):
+                    if item.get("type") == "message":
+                        for c in item.get("content", []):
+                            if c.get("type") == "output_text":
+                                text = c.get("text", "")
+                                if text:
+                                    return text
+            return ""
+        except Exception as e:
+            logger.warning(f"_call_responses_endpoint ({req_model}) failed: {str(e)[:100]}")
+            return ""
 
     @property
     def is_available(self) -> bool:
@@ -312,7 +401,14 @@ class AIAnalyzer:
     ) -> str:
         """Send trading data to AI provider and return analysis."""
         if not self.is_available:
-            return self._fallback_analysis(daily_stats, alerts)
+            return self._fallback_analysis(
+                daily_stats,
+                alerts,
+                rules=rules,
+                journal_stats=journal_stats,
+                today_trades=today_trades_from_db,
+                error_context="No AI provider configured"
+            )
 
         user_content = self._build_prompt(
             daily_stats, open_positions, alerts, rules, custom_prompt,
@@ -323,46 +419,83 @@ class AIAnalyzer:
             advanced_analytics=advanced_analytics,
         )
 
-        # For smaller models (8B on NVIDIA NIM), use condensed prompt & lower max_tokens
-        is_small_model = self._provider_name in ("nvidia-nim", "groq") or "8b" in self._model.lower()
+        # For smaller models or proxy providers, use condensed prompt & reasonable token budget
+        _m = self._model.lower()
+        is_small_model = (
+            self._provider_name in ("nvidia-nim", "groq")
+            or "8b" in _m
+            or _m in ("gpt-6-astra", "gpt-6.1-sol")
+            or ("astra" in _m)
+            or ("sol" in _m and "sonnet" not in _m)
+            or ("flash" in _m and "deepseek" not in _m)  # deepseek-v4-flash is capable
+        )
         sys_prompt = SYSTEM_PROMPT_CONDENSED if is_small_model else SYSTEM_PROMPT
         max_tok = 4096 if is_small_model else 8192
 
         try:
             def _call_api():
-                return self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                    temperature=0.6,
-                    max_tokens=max_tok,
-                )
+                target_model = self._model or "gpt-6-astra"
+                # Known-good fallback models on AgentRouter
+                AGENTROUTER_FALLBACKS = ["gpt-6-astra", "gpt-6.1-sol"]
 
-            response = await asyncio.to_thread(_call_api)
-            return response.choices[0].message.content
+                models_to_try = [target_model]
+                # For AgentRouter, add known-good fallbacks after the user's chosen model
+                if self._provider_name == "agentrouter":
+                    for fb in AGENTROUTER_FALLBACKS:
+                        if fb not in models_to_try:
+                            models_to_try.append(fb)
+
+                last_exc = None
+                for m in models_to_try:
+                    try:
+                        # AgentRouter uses the /v1/responses endpoint for ALL models
+                        if self._provider_name == "agentrouter":
+                            logger.info(f"Calling AgentRouter responses endpoint with model='{m}'")
+                            ans = self._call_responses_endpoint(f"{sys_prompt}\n\n{user_content}", model=m)
+                            if ans and len(ans.strip()) > 30:
+                                return ans
+                            logger.warning(f"AgentRouter responses endpoint returned empty for model '{m}', trying next...")
+                            continue
+
+                        # Standard chat completions for non-AgentRouter providers
+                        resp = self._client.chat.completions.create(
+                            model=m,
+                            messages=[
+                                {"role": "system", "content": sys_prompt},
+                                {"role": "user", "content": user_content},
+                            ],
+                            temperature=0.6,
+                            max_tokens=max_tok,
+                            timeout=120,
+                        )
+                        choice = resp.choices[0].message
+                        content = choice.content or ""
+                        if not content and hasattr(choice, "reasoning_content") and choice.reasoning_content:
+                            content = choice.reasoning_content
+                        if content and len(content.strip()) > 30:
+                            return content
+                    except Exception as e:
+                        last_exc = e
+                        err_str = str(e)
+                        logger.warning(f"AI call failed for model '{m}': {err_str[:120]}. Trying next candidate...")
+                        continue
+
+                if last_exc:
+                    raise last_exc
+                raise RuntimeError("All candidate AI models failed to return a response.")
+
+            return await asyncio.to_thread(_call_api)
         except Exception as e:
             self._last_error = str(e)
-            error_lower = str(e).lower()
-            # Surface actionable messages
-            if "429" in str(e) or "insufficient" in error_lower or "balance" in error_lower or "quota" in error_lower:
-                msg = (f"## \u26a0\ufe0f AI Analysis Unavailable\n\n"
-                       f"**Provider:** {self._provider_name} | **Model:** {self._model}\n\n"
-                       f"**Error:** API quota exceeded or insufficient balance.\n\n"
-                       f"**Fix:** Top up your `{self._provider_name.upper()}` account, or add a different provider key "
-                       f"(`GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`) in `backend/.env` and restart.")
-                logger.error(f"AI analysis quota error ({self._provider_name}): {e}")
-                return msg
-            elif "model" in error_lower or "1211" in str(e):
-                msg = (f"## \u26a0\ufe0f AI Analysis Unavailable\n\n"
-                       f"**Provider:** {self._provider_name} | **Model:** {self._model}\n\n"
-                       f"**Error:** Model not found.\n\n"
-                       f"**Fix:** Set `AI_MODEL=` to a valid model for `{self._provider_name}` in `backend/.env`.")
-                logger.error(f"AI analysis model error ({self._provider_name}): {e}")
-                return msg
-            logger.error(f"AI analysis error ({self._provider_name}): {e}")
-            return self._fallback_analysis(daily_stats, alerts)
+            logger.warning(f"AI analysis request failed or did not arrive ({self._provider_name}): {e}. Falling back to comprehensive offline analysis.")
+            return self._fallback_analysis(
+                daily_stats,
+                alerts,
+                rules=rules,
+                journal_stats=journal_stats,
+                today_trades=today_trades_from_db,
+                error_context=str(e),
+            )
 
     # ------------------------------------------------------------------
     # Helpers for sequential & frequency stats
@@ -918,41 +1051,178 @@ class AIAnalyzer:
             lines.append("")
 
         if custom_prompt:
-            lines.append("## Additional Context from Trader")
-            lines.append(custom_prompt)
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+            lines.append("## ⚡ PRIORITY DIRECTIVE FROM TRADER (MUST ADDRESS)")
+            lines.append("")
+            lines.append("The trader has specifically requested the following focus area. You MUST directly and thoroughly address this in your analysis. Dedicate a dedicated section to this request:")
+            lines.append("")
+            lines.append(f"> **\"{custom_prompt}\"**")
+            lines.append("")
+            lines.append("Weave this context into your psychological analysis and provide specific, data-backed insights addressing their request. Do NOT ignore this.")
 
         return "\n".join(lines)
 
-    def _fallback_analysis(self, daily_stats: dict, alerts: list[dict]) -> str:
-        """Generate a basic analysis when the AI API is not available."""
-        score = max(0, 100 - len(alerts) * 15)
-        trade_count = daily_stats.get("total_trades", 0)
-        net_pnl = daily_stats.get("net_pnl", 0)
-        win_rate = daily_stats.get("win_rate", 0)
+    def _fallback_analysis(
+        self,
+        daily_stats: dict,
+        alerts: list[dict],
+        rules: dict = None,
+        journal_stats: dict = None,
+        today_trades: list[dict] = None,
+        error_context: str = "",
+    ) -> str:
+        """
+        Generate a comprehensive, mentor-grade AXIOM analysis locally when cloud AI API
+        requests do not arrive, time out, or provider token access is limited/expired.
+        """
+        rules = rules or {}
+        journal_stats = journal_stats or {}
+        today_trades = today_trades or []
+        trade_count = daily_stats.get("total_trades", len(today_trades))
+        net_pnl = float(daily_stats.get("net_pnl", sum(t.get("profit", 0) for t in today_trades)))
+        win_rate = float(daily_stats.get("win_rate", 0))
+        winning_trades = int(daily_stats.get("winning_trades", sum(1 for t in today_trades if t.get("profit", 0) > 0)))
+        losing_trades = int(daily_stats.get("losing_trades", sum(1 for t in today_trades if t.get("profit", 0) < 0)))
+        total_profit = float(daily_stats.get("total_profit", sum(t.get("profit", 0) for t in today_trades if t.get("profit", 0) > 0)))
+        total_loss = abs(float(daily_stats.get("total_loss", sum(t.get("profit", 0) for t in today_trades if t.get("profit", 0) < 0))))
+        profit_factor = round(total_profit / total_loss, 2) if total_loss > 0 else ("∞" if total_profit > 0 else 0.0)
 
-        lines = [
-            "## 📊 Performance Summary",
-            f"Today you took **{trade_count} trades** with a net P&L of **{net_pnl:.2f}** "
-            f"and a win rate of **{win_rate:.1f}%**.",
-            "",
-            "## 🎯 Discipline Assessment",
-        ]
-        if not alerts:
-            lines.append("**Grade: A** — No rule violations detected. Excellent discipline!")
+        # Largest win & loss
+        profits = [float(t.get("profit", 0)) for t in today_trades]
+        largest_win = max(profits) if profits and max(profits) > 0 else 0.0
+        largest_loss = min(profits) if profits and min(profits) < 0 else 0.0
+
+        # Hold times & psychological metrics
+        avg_win_duration = daily_stats.get("avg_win_duration_minutes", 0)
+        avg_loss_duration = daily_stats.get("avg_loss_duration_minutes", 0)
+        revenge_count = daily_stats.get("revenge_trades_count", 0)
+
+        # Discipline grade computation
+        has_revenge = revenge_count > 0 or any("revenge" in a.get("message", "").lower() for a in alerts)
+        num_violations = len(alerts)
+        if has_revenge:
+            grade = "F"
+            grade_desc = "Revenge trading detected. Emotions took over the wheel today. That is an automatic F."
+        elif num_violations == 0 and net_pnl >= 0:
+            grade = "A" if trade_count > 0 else "A+"
+            grade_desc = "Clean execution. Zero rule breaches and controlled risk throughout the session."
+        elif num_violations <= 1 and net_pnl >= 0:
+            grade = "B"
+            grade_desc = "Solid control with isolated minor friction. Discipline held up well overall."
+        elif num_violations <= 2:
+            grade = "C"
+            grade_desc = "Visible execution leaks and boundary testing. You gave back profits or widened risk."
+        elif num_violations <= 4:
+            grade = "D"
+            grade_desc = "Multiple rule violations. Discipline broke down under market pressure."
         else:
-            lines.append(f"**Grade: {'C' if len(alerts) <= 2 else 'F'}** — "
-                         f"{len(alerts)} violation(s) detected today.")
-            for a in alerts:
-                lines.append(f"- ⚠️ {a['message']}")
-        lines.extend([
-            "",
-            "## 💡 Recommendations",
-            "- Add an AI provider key in `backend/.env` for detailed AI-powered analysis.",
-            "  Supported: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`",
-            "- Review your rule configuration in Settings.",
-            "",
-            f"## 🏆 Score: {score}/100",
-            "",
-            "*This is a basic analysis. Add an AI provider API key and restart the backend for full AI coaching.*"
-        ])
+            grade = "F"
+            grade_desc = "Severe breakdown in rules and risk parameters. Trading must halt immediately."
+
+        lines = []
+
+        if error_context:
+            clean_err = error_context.split("\n")[0][:90]
+            lines.append(f"> ℹ️ **AXIOM Local Intelligence**: Cloud AI service request did not arrive ({clean_err}). AXIOM has generated this comprehensive session review using local risk and behavioural forensics.\n")
+
+        # Personal greeting
+        if trade_count == 0:
+            lines.append("You stayed on the sidelines today with zero trades. The discipline to sit on your hands when your setup is absent is just as valuable as executing a textbook winner.\n")
+        elif net_pnl >= 0 and num_violations == 0:
+            lines.append(f"I watched your session today. You locked in **{net_pnl:+.2f}** over **{trade_count} trade(s)** with zero rule violations. This is the definition of controlled execution.\n")
+        elif net_pnl < 0 and num_violations == 0:
+            lines.append(f"The numbers closed in red today at **{net_pnl:.2f}**, but your rules held firm. Losses are the operating cost of trading when risk is capped. Let's review the data.\n")
+        else:
+            lines.append(f"We have things to address today. You closed with **{trade_count} trade(s)** and **{num_violations} rule violation(s)**. Radical honesty is what keeps you alive in this game.\n")
+
+        # Performance Snapshot
+        lines.append("## 📊 Performance Snapshot")
+        lines.append(f"- **Total Trades:** {trade_count} ({winning_trades}W / {losing_trades}L)")
+        lines.append(f"- **Net P&L:** {net_pnl:+.2f}")
+        lines.append(f"- **Win Rate:** {win_rate:.1f}%")
+        lines.append(f"- **Profit Factor:** {profit_factor}")
+        lines.append(f"- **Largest Win vs Loss:** +{largest_win:.2f} vs {largest_loss:.2f}")
+
+        # Comparison with historical
+        weekly_wr = journal_stats.get("weekly", {}).get("win_rate")
+        overall_wr = journal_stats.get("overall", {}).get("win_rate")
+        if weekly_wr is not None and overall_wr is not None:
+            lines.append(f"- **Historical Comparison:** Today's WR of {win_rate:.1f}% compares to weekly {weekly_wr}% and overall {overall_wr}%.")
+        lines.append("")
+
+        # Session Performance Audit
+        lines.append("## 📐 Session Performance Audit")
+        session_rules = rules.get("sessions", {})
+        session_max = rules.get("max_trades_per_session", 2)
+        lines.append(f"- **Configured Session Cap:** {session_max} trades max per session.")
+        for s_name in ["asia", "london", "newyork"]:
+            s_cfg = session_rules.get(s_name, {})
+            if s_cfg.get("enabled", True):
+                lines.append(f"- **{s_name.capitalize()} Session:** Configured window {s_cfg.get('start', '00:00')}–{s_cfg.get('end', '23:59')} (Limit: {s_cfg.get('max_trades', session_max)})")
+        lines.append("")
+
+        # Psychological Autopsy
+        lines.append("## 🧠 Psychological Autopsy")
+        if avg_win_duration or avg_loss_duration:
+            p_ratio = (avg_win_duration / avg_loss_duration) if avg_loss_duration > 0 else 1.0
+            if p_ratio >= 1.0:
+                lines.append(f"- **Patience Ratio:** Positive ({p_ratio:.2f}). You held winners ({avg_win_duration:.1f}m) longer than losers ({avg_loss_duration:.1f}m). That is proper asymmetry.")
+            else:
+                lines.append(f"- **Patience Ratio Warning:** Negative ({p_ratio:.2f}). You held losers ({avg_loss_duration:.1f}m) longer than winners ({avg_win_duration:.1f}m). That is hope replacing discipline.")
+
+        if has_revenge:
+            lines.append(f"- **Revenge Trading:** ⚠️ Detected! {revenge_count} trade(s) entered within 5 minutes of a loss. Taking trades out of frustration destroys account equity.")
+        else:
+            lines.append("- **Revenge Trading:** ✅ None detected. You took adequate pauses between outcomes.")
+
+        max_daily_trades = rules.get("max_trades_per_day", 3)
+        if trade_count > max_daily_trades:
+            lines.append(f"- **Overtrading:** ⚠️ Breached! {trade_count} trades taken vs your daily limit of {max_daily_trades}.")
+        else:
+            lines.append(f"- **Trade Pacing:** ✅ Maintained within your daily limit ({trade_count}/{max_daily_trades} trades).")
+        lines.append("")
+
+        # Rule Compliance Audit Table
+        lines.append("## ✅ Rule Compliance Audit")
+        lines.append("| Rule | Limit | Actual | Verdict |")
+        lines.append("|------|-------|--------|---------|")
+        lines.append(f"| Max Trades / Day | {max_daily_trades} | {trade_count} | {'✅ OK' if trade_count <= max_daily_trades else '❌ BREACHED'} |")
+        max_lot = rules.get("max_lot_size", 1.0)
+        largest_lot = max([float(t.get("volume", 0)) for t in today_trades], default=0.0)
+        lines.append(f"| Max Lot Size | {max_lot} | {largest_lot:.2f} | {'✅ OK' if largest_lot <= max_lot else '❌ BREACHED'} |")
+        max_daily_loss = rules.get("max_daily_loss_pct", 3.0)
+        lines.append(f"| Daily Loss % Limit | {max_daily_loss}% | {abs(min(net_pnl, 0)):.2f} | {'✅ OK' if net_pnl >= -(max_daily_loss * 100) else '❌ BREACHED'} |")
+        lines.append("")
+
+        # Edge Diagnosis
+        lines.append("## 🔬 Edge Diagnosis")
+        if profit_factor == "∞" or (isinstance(profit_factor, (int, float)) and profit_factor >= 1.5):
+            lines.append(f"Your edge is mathematically sound today with a Profit Factor of **{profit_factor}**. Your primary objective is protecting capital and eliminating unforced execution errors.")
+        elif isinstance(profit_factor, (int, float)) and profit_factor > 0:
+            lines.append(f"Profit Factor stands at **{profit_factor}**. The strategy is generating positive cash flow, but hold time or stop-loss leaks are diluting the net edge.")
+        else:
+            lines.append("Negative expectancy recorded for this session. Review trade entries against your documented SMC/Price Action rules before opening risk tomorrow.")
+        lines.append("")
+
+        # Tomorrow's Directives
+        lines.append("## 💡 Tomorrow's Directives")
+        if has_revenge:
+            lines.append("1. **Mandatory 15-Minute Timeout [Psychology]:** Step away from the screen immediately after any losing trade.")
+        else:
+            lines.append("1. **Trade Quality Filter [Execution]:** Take only A+ setups meeting all confluent entry criteria.")
+        if trade_count >= max_daily_trades:
+            lines.append(f"2. **Strict Daily Ceiling [Discipline]:** Stop trading immediately upon reaching {max_daily_trades} closed trades.")
+        else:
+            lines.append("2. **Fractional Risk Sizing [Risk]:** Deploy 40-50% on initial entry; only scale if market confirms.")
+        lines.append("3. **Hard Stop Adherence [Capital]:** Pre-determine your invalidation level before clicking entry and respect it without exception.\n")
+
+        # Discipline Grade
+        lines.append(f"## 🏆 Discipline Grade: **{grade}**")
+        lines.append(f"{grade_desc}\n")
+
+        # Closing sign-off
+        lines.append("Trading is a long game of probabilistic execution. Take the data from today, eliminate the emotional friction, and come back prepared for the next session.")
+
         return "\n".join(lines)

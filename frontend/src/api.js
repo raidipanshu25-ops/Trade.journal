@@ -125,6 +125,11 @@ export const api = {
     method: 'PUT',
     body: JSON.stringify(settings),
   }),
+  getAiConfig: () => apiFetch('/settings/ai-config'),
+  saveAiConfig: (config) => apiFetch('/settings/ai-config', {
+    method: 'POST',
+    body: JSON.stringify(config),
+  }),
 
   // AI Powered Trading Journal & Analytics
   journalTrades: (options = {}) => {

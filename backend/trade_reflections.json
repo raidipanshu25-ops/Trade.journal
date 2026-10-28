@@ -1,0 +1,64 @@
+{
+  "2026-10-20": [
+    {
+      "ts": "2026-10-20T15:04:26.311902+00:00",
+      "ticket": "1706450",
+      "followed_entry": true,
+      "followed_exit": true,
+      "note": "",
+      "user": "anonymous"
+    },
+    {
+      "ts": "2026-10-20T15:04:55.221873+00:00",
+      "ticket": "1707378",
+      "followed_entry": true,
+      "followed_exit": true,
+      "note": "",
+      "user": "anonymous"
+    }
+  ],
+  "2026-10-26": [
+    {
+      "ts": "2026-10-26T06:03:48.623607+00:00",
+      "ticket": "1792459",
+      "followed_entry": true,
+      "followed_exit": true,
+      "note": "I have followed the execution plan for this first trade of the week to it green ",
+      "user": "local"
+    },
+    {
+      "ts": "2026-10-26T10:19:42.162190+00:00",
+      "ticket": "1796409",
+      "followed_entry": true,
+      "followed_exit": true,
+      "note": "",
+      "user": "local"
+    },
+    {
+      "ts": "2026-10-26T10:20:40.094653+00:00",
+      "ticket": "1796410",
+      "followed_entry": true,
+      "followed_exit": true,
+      "note": "",
+      "user": "local"
+    }
+  ],
+  "2026-10-27": [
+    {
+      "ts": "2026-10-27T12:03:31.058306+00:00",
+      "ticket": "1816335",
+      "followed_entry": true,
+      "followed_exit": true,
+      "note": "",
+      "user": "local"
+    },
+    {
+      "ts": "2026-10-27T12:04:23.026550+00:00",
+      "ticket": "1816914",
+      "followed_entry": true,
+      "followed_exit": true,
+      "note": "",
+      "user": "local"
+    }
+  ]
+}

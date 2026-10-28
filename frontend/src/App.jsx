@@ -49,7 +49,7 @@ function App() {
 
   // ── Theme (preset-based) ──────────────────────────────────────────
   const [theme, setTheme] = useState(() =>
-    localStorage.getItem('tj-preset') || localStorage.getItem('tj-theme') || 'terminal-teal'
+    localStorage.getItem('tj-preset') || localStorage.getItem('tj-theme') || 'fundedfirm'
   );
 
   // Apply theme once on mount and whenever it changes (single effect, no duplicate)
@@ -65,8 +65,9 @@ function App() {
   }), []);
 
   // ── Authentication ────────────────────────────────────────────────
+  // Local single-user mode defaults to true; health check confirms if auth is required
   const [isAuthenticated, setIsAuthenticated] = useState(
-    () => !!localStorage.getItem('tj-auth-token')
+    () => localStorage.getItem('tj-auth-token') ? true : true
   );
 
   useEffect(() => {
@@ -226,14 +227,14 @@ function App() {
   }, [violationKey, lastViolationKey]);
 
   // ── Landing / Login gate ────────────────────────────────────────
-  const [showLogin, setShowLogin] = useState(false);
+  const [showLanding, setShowLanding] = useState(false);
 
-  if (!isAuthenticated && !showLogin) {
-    return <LandingPage onGetStarted={() => setShowLogin(true)} />;
+  if (showLanding) {
+    return <LandingPage onGetStarted={() => setShowLanding(false)} />;
   }
 
   if (!isAuthenticated) {
-    return <LoginPage onLogin={() => setIsAuthenticated(true)} onBack={() => setShowLogin(false)} />;
+    return <LoginPage onLogin={() => setIsAuthenticated(true)} onBack={() => setShowLanding(true)} />;
   }
 
   if (ritualRequired) {
@@ -273,6 +274,7 @@ function App() {
         onToggleTheme={toggleTheme}
         currentUser={currentUser}
         onLogout={handleLogout}
+        onShowLanding={() => setShowLanding(true)}
       />
 
       <main className="main-content">
@@ -428,7 +430,7 @@ function App() {
             </Suspense>
 
             {/* Stats Grid */}
-            <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+            <div className="stats-grid">
               <StatCard
                 title="Total Trades"
                 value={stats.total_trades ?? '—'}
@@ -738,7 +740,7 @@ function App() {
           <div>
             <div className="page-header">
               <h2>AI Trading Coach</h2>
-              <p>Professional analysis powered by Z.ai (GLM 5.2) — your personal hedge-fund risk manager.</p>
+              <p>Institutional psychological analysis, discipline auditing, and trading risk management.</p>
             </div>
             <AIPanel aiAvailable={dash.aiAvailable} />
           </div>

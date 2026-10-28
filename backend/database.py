@@ -864,12 +864,13 @@ def update_trade(ticket: int, data: dict):
 
 
 def get_trade_history(date: str = None, symbol: str = None,
-                      limit: int = 100, offset: int = 0, user_id: int = 0) -> list[dict]:
+                      limit: int = 100, offset: int = 0, user_id: int = 1) -> list[dict]:
     """Get trade history with optional date/symbol filters."""
+    uid = user_id if (user_id and user_id > 0) else 1
     conn = get_connection()
     cursor = conn.cursor()
     query = "SELECT * FROM trade_history WHERE user_id = ?"
-    params = [user_id]
+    params = [uid]
 
     if date:
         query += " AND date = ?"
@@ -887,7 +888,7 @@ def get_trade_history(date: str = None, symbol: str = None,
     return [dict(r) for r in rows]
 
 
-def _compute_period_stats(cursor, date_filter: str = None, user_id: int = 0) -> dict:
+def _compute_period_stats(cursor, date_filter: str = None, user_id: int = 1) -> dict:
     """Compute WR, RR, expectancy, profit factor in a SINGLE SQL query.
 
     Previously fired 6+ separate SELECT statements per period.
@@ -901,7 +902,8 @@ def _compute_period_stats(cursor, date_filter: str = None, user_id: int = 0) -> 
         dict with wins, losses, total, win_rate, rr_ratio, expectancy,
         profit_factor, net_pnl, gross_profit, gross_loss, avg_win, avg_loss.
     """
-    where = f"WHERE user_id = {user_id}"
+    uid = user_id if (user_id and user_id > 0) else 1
+    where = f"WHERE user_id = {uid}"
     if date_filter:
         where += f" AND {date_filter}"
 
@@ -968,7 +970,7 @@ def _compute_period_stats(cursor, date_filter: str = None, user_id: int = 0) -> 
     }
 
 
-def get_journal_stats(user_id: int = 0) -> dict:
+def get_journal_stats(user_id: int = 1) -> dict:
     """Get journal statistics at daily, weekly, and overall granularity.
     
     Returns daily/weekly/overall WR, RR, expectancy, profit factor,
@@ -977,6 +979,7 @@ def get_journal_stats(user_id: int = 0) -> dict:
     from datetime import datetime, timezone, timedelta
     from config import load_settings
     
+    uid = user_id if (user_id and user_id > 0) else 1
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -984,15 +987,15 @@ def get_journal_stats(user_id: int = 0) -> dict:
     week_ago = (datetime.now(get_local_tz()) - timedelta(days=7)).strftime("%Y-%m-%d")
 
     # Period stats
-    daily = _compute_period_stats(cursor, f"date = '{today}'", user_id)
-    weekly = _compute_period_stats(cursor, f"date >= '{week_ago}'", user_id)
-    overall = _compute_period_stats(cursor, None, user_id)
+    daily = _compute_period_stats(cursor, f"date = '{today}'", uid)
+    weekly = _compute_period_stats(cursor, f"date >= '{week_ago}'", uid)
+    overall = _compute_period_stats(cursor, None, uid)
 
     # Extra overall-only fields
-    cursor.execute("SELECT DISTINCT symbol FROM trade_history WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT DISTINCT symbol FROM trade_history WHERE user_id = ?", (uid,))
     symbols = [r["symbol"] for r in cursor.fetchall()]
 
-    cursor.execute("SELECT DISTINCT date FROM trade_history WHERE user_id = ? ORDER BY date DESC", (user_id,))
+    cursor.execute("SELECT DISTINCT date FROM trade_history WHERE user_id = ? ORDER BY date DESC", (uid,))
     trading_days = [r["date"] for r in cursor.fetchall()]
     num_days = len(trading_days)
     overall["avg_trades_per_day"] = round(overall["trades"] / num_days, 1) if num_days > 0 else 0
@@ -1284,7 +1287,7 @@ def export_training_data(start_date: str = None, end_date: str = None, user_id: 
 #  Advanced Analytics — GFT-style deep analysis
 # ------------------------------------------------------------------ #
 
-def get_advanced_analytics(user_id: int = 0) -> dict:
+def get_advanced_analytics(user_id: int = 1) -> dict:
     """Compute comprehensive analytics replicating Goat Funded Trader dashboard.
     
     Returns a dict with:
@@ -1301,13 +1304,14 @@ def get_advanced_analytics(user_id: int = 0) -> dict:
     """
     from config import load_settings
     
+    uid = user_id if (user_id and user_id > 0) else 1
     conn = get_connection()
     cursor = conn.cursor()
     
     # Fetch ALL trades at once — more efficient than many queries
     cursor.execute(
         "SELECT * FROM trade_history WHERE user_id = ? ORDER BY close_time ASC",
-        (user_id,)
+        (uid,)
     )
     all_trades = [dict(r) for r in cursor.fetchall()]
     conn.close()

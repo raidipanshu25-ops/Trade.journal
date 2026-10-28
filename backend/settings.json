@@ -1,7 +1,9 @@
 {
+  "timezone": "Asia/Kolkata",
   "max_lot_size": 0.5,
   "max_daily_loss_pct": 0.8,
   "max_session_loss_pct": 0.6,
+  "auto_enforce_rules": false,
   "sessions": {
     "asia": {
       "start": "05:30",
@@ -36,7 +38,7 @@
       "conditions": [
         {
           "type": "consecutive_wins",
-          "lookback_trades": 2,
+          "lookback_trades": 1,
           "source_session": "asia"
         }
       ]
@@ -49,11 +51,9 @@
         {
           "type": "consecutive_wins",
           "lookback_trades": 2,
-          "source_session": "london"
+          "source_session": "all"
         }
       ]
     }
-  ],
-  "timezone": "Asia/Kolkata",
-  "auto_enforce_rules": false
+  ]
 }

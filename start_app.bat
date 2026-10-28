@@ -7,42 +7,36 @@ echo.
 
 set PY_CMD=
 
-:: Probe Python candidates in priority order
-for %%P in ("py -3.11" "py -3.12" "py -3.10" "py -3" "py" "python") do (
+:: Probe direct Python 3.12 first, then other versions and py launcher
+for %%P in ("%LOCALAPPDATA%\Programs\Python\Python312\python.exe" "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" "%ProgramFiles%\Python312\python.exe" "%ProgramFiles%\Python311\python.exe" "py -3.12" "py -3.11" "py -3.10" "py -3.13" "py" "python") do (
     if not defined PY_CMD (
-        %%~P -c "import sys" >nul 2>&1
-        if not errorlevel 1 (
-            set PY_CMD=%%~P
+        if exist %%P (
+            %%P -c "import sys; sys.exit(0 if 10 <= sys.version_info[1] <= 14 else 1)" >nul 2>&1
+            if not errorlevel 1 (
+                set PY_CMD=%%P
+                goto :found_py
+            )
+        ) else (
+            %%~P -c "import sys; sys.exit(0 if 10 <= sys.version_info[1] <= 14 else 1)" >nul 2>&1
+            if not errorlevel 1 (
+                set PY_CMD=%%~P
+                goto :found_py
+            )
         )
     )
 )
 
+:found_py
 if not defined PY_CMD (
-    for %%D in (
-        "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-        "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-        "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
-        "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
-        "%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
-        "%LOCALAPPDATA%\Python\bin\python.exe"
-        "%LOCALAPPDATA%\Python\pythoncore-3.14-64\python.exe"
-        "%ProgramFiles%\Python311\python.exe"
-        "%ProgramFiles%\Python312\python.exe"
-        "C:\Python311\python.exe"
-        "C:\Python312\python.exe"
-    ) do (
-        if not defined PY_CMD if exist "%%~D" (
-            set PY_CMD="%%~D"
-        )
-    )
-)
-
-if not defined PY_CMD (
-    echo [ERROR] Python 3.11+ is not found!
-    echo Please install Python from https://www.python.org/
+    echo [ERROR] Compatible Python (3.10 - 3.14) was not found!
+    echo MetaTrader 5 requires Python 3.10 - 3.14. Python 3.15+ is not yet supported by MT5.
     pause
     exit /b 1
 )
+
+:: Free ports 8000 and 5173 if already held by stale background sessions
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8000 ^| findstr LISTENING') do taskkill /f /pid %%a >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr :5173 ^| findstr LISTENING') do taskkill /f /pid %%a >nul 2>&1
 
 :: Check Node.js
 where npm >nul 2>&1
@@ -67,8 +61,18 @@ if not exist "frontend\node_modules" (
 )
 
 echo.
+echo Launching MetaTrader 5 Desktop Terminal GUI...
+tasklist /fi "imagename eq terminal64.exe" 2>nul | find /i "terminal64.exe" >nul
+if errorlevel 1 (
+    if exist "%ProgramFiles%\MetaTrader 5\terminal64.exe" (
+        start "" /d "%ProgramFiles%\MetaTrader 5" "%ProgramFiles%\MetaTrader 5\terminal64.exe"
+        timeout /t 2 /nobreak >nul
+    )
+)
+
+echo.
 echo [3/4] Starting FastAPI Backend (http://localhost:8000)...
-start "Trade.journal Backend" cmd /k "title TJ Backend && cd /d "%~dp0" && %PY_CMD% -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload"
+start "Trade.journal Backend" cmd /k "title TJ Backend && cd /d "%~dp0backend" && %PY_CMD% -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
 
 echo.
 echo [4/4] Starting Frontend Dev Server (http://localhost:5173)...

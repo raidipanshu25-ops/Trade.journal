@@ -47,7 +47,7 @@ def extract_user_from_token(request: Request = None) -> dict | None:
         if auth_header.startswith("Bearer "):
             return _decode_token(auth_header.split(" ", 1)[1])
     if not ADMIN_PASSWORD:
-        return {"sub": "anonymous", "user_id": 0, "role": "user"}
+        return {"sub": "local", "user_id": 1, "role": "admin"}
     return None
 
 async def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
@@ -74,7 +74,7 @@ def verify_ws_token(token: str) -> dict | None:
     while callers that need the user_id can read it from the return value.
     """
     if not ADMIN_PASSWORD:
-        return {"sub": "anonymous", "user_id": 0, "role": "user"}
+        return {"sub": "local", "user_id": 1, "role": "admin"}
     if not token:
         return None
     try:

@@ -1,15 +1,27 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { api } from '../api';
 
 /**
  * AI Analysis panel — dynamic provider badge + shimmer loading.
+ * Fixed: robust polling, proper error display, retry button.
  */
 export function AIPanel({ aiAvailable }) {
   const [analysis, setAnalysis] = useState(null);
   const [loading, setLoading] = useState(false);
   const [customPrompt, setCustomPrompt] = useState('');
   const [aiStatus, setAiStatus] = useState(null);
+  const [error, setError] = useState('');
+  const pollRef = useRef(null);
+  const timeoutRef = useRef(null);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     const today = new Date().toISOString().split('T')[0];
@@ -23,32 +35,86 @@ export function AIPanel({ aiAvailable }) {
     api.aiStatus().then(setAiStatus).catch(console.error);
   }, []);
 
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+  };
+
   const runAnalysis = async () => {
     setLoading(true);
+    setError('');
+    stopPolling();
+
+    // Remember existing analysis ID to ensure we don't immediately resolve to stale cached data
+    const initialId = analysis?.id || 0;
+    const requestStartTime = Date.now();
     setAnalysis(null);
+
     try {
       const result = await api.runAnalysis({
         custom_prompt: customPrompt || undefined,
       });
+
       if (result.status === 'started') {
         const today = new Date().toISOString().split('T')[0];
-        const poll = setInterval(async () => {
+        let pollCount = 0;
+        const MAX_POLLS = 90; // 90 × 1.5s = 135s max wait
+
+        pollRef.current = setInterval(async () => {
+          pollCount++;
           try {
             const res = await api.analysisHistory(today);
-            if (res && res.analysis && !res.message) {
+            const isNewResult = res && res.analysis && !res.message && (
+              (res.id && res.id > initialId) ||
+              (!initialId && res.analysis) ||
+              (res.created_at && new Date(res.created_at).getTime() >= requestStartTime - 2000)
+            );
+            if (isNewResult) {
               setAnalysis(res);
               setLoading(false);
-              clearInterval(poll);
+              stopPolling();
+            } else if (pollCount >= MAX_POLLS) {
+              setError('Analysis is taking longer than expected. Please click Retry or refresh the page.');
+              setLoading(false);
+              stopPolling();
             }
-          } catch (e) {}
-        }, 3000);
-        setTimeout(() => { clearInterval(poll); setLoading(false); }, 120000);
+          } catch (e) {
+            if (pollCount >= MAX_POLLS) {
+              setError('Could not retrieve analysis results. Please try again.');
+              setLoading(false);
+              stopPolling();
+            }
+          }
+        }, 1500);
+
+        // Hard timeout at 140 seconds
+        timeoutRef.current = setTimeout(() => {
+          stopPolling();
+          setLoading(false);
+          setError('Analysis request timed out. Please click Retry.');
+        }, 140000);
+      } else if (result.analysis) {
+        // Direct result (shouldn't normally happen with background task but handle it)
+        setAnalysis(result);
+        setLoading(false);
+      } else if (result.error) {
+        setError(result.error);
+        setLoading(false);
       } else {
         setAnalysis(result);
         setLoading(false);
       }
     } catch (err) {
-      setAnalysis({ analysis: `Error: ${err.message}`, score: 0 });
+      const errMsg = err.message || 'Unknown error';
+      if (errMsg.includes('429') || errMsg.toLowerCase().includes('quota')) {
+        setError('AI provider quota exceeded. Please wait a moment or check your API key balance.');
+      } else if (errMsg.includes('401') || errMsg.includes('403')) {
+        setError('AI provider authentication failed. Check your API key in Settings.');
+      } else if (errMsg.includes('timeout') || errMsg.toLowerCase().includes('network')) {
+        setError('Network error reaching AI provider. Please check your connection and try again.');
+      } else {
+        setError(`Analysis failed: ${errMsg}`);
+      }
       setLoading(false);
     }
   };
@@ -56,12 +122,13 @@ export function AIPanel({ aiAvailable }) {
   // Determine badge label from status
   const providerLabel = aiStatus?.analyzer?.provider
     ? aiStatus.analyzer.provider.toUpperCase()
-    : 'Z.ai';
+    : 'AI COACH';
   const modelLabel = aiStatus?.analyzer?.model || '';
   const isProviderAvailable = aiStatus?.analyzer?.available ?? aiAvailable;
 
   // Provider badge color map
   const badgeColors = {
+    agentrouter:  'linear-gradient(135deg, #01FFA6, #00B88A)',
     gemini:       'linear-gradient(135deg, #4285f4, #0f9d58)',
     openai:       'linear-gradient(135deg, #10a37f, #1a7f64)',
     openrouter:   'linear-gradient(135deg, #7c3aed, #4f46e5)',
@@ -72,8 +139,8 @@ export function AIPanel({ aiAvailable }) {
     zai:          'linear-gradient(135deg, #4a9eff, #3b82f6)',
     none:         'linear-gradient(135deg, #6b7280, #4b5563)',
   };
-  const providerKey = aiStatus?.analyzer?.provider || 'zai';
-  const badgeBg = badgeColors[providerKey] || badgeColors.zai;
+  const providerKey = aiStatus?.analyzer?.provider || 'agentrouter';
+  const badgeBg = badgeColors[providerKey] || badgeColors.agentrouter;
 
   return (
     <div className="ai-panel" id="ai-panel">
@@ -170,7 +237,36 @@ export function AIPanel({ aiAvailable }) {
       )}
 
       <div className="ai-content">
-        {!analysis && !loading && (
+        {/* Error banner with retry */}
+        {error && !loading && (
+          <div style={{
+            background: 'var(--red-dim)',
+            border: '1px solid var(--red-border)',
+            borderRadius: 'var(--radius-m)',
+            padding: '14px 18px',
+            margin: '0 0 16px 0',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+          }}>
+            <div>
+              <div style={{ color: 'var(--red-bright)', fontSize: '0.85rem', fontWeight: 600, marginBottom: '4px' }}>
+                Analysis Failed
+              </div>
+              <div style={{ color: 'var(--text-2)', fontSize: '0.78rem' }}>{error}</div>
+            </div>
+            <button
+              className="btn btn-secondary"
+              onClick={() => { setError(''); runAnalysis(); }}
+              style={{ flexShrink: 0, fontSize: '0.78rem', padding: '8px 16px' }}
+            >
+              ↻ Retry
+            </button>
+          </div>
+        )}
+
+        {!analysis && !loading && !error && (
           <div className="empty-state">
             <div className="empty-state-icon">
               <svg viewBox="0 0 24 24" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -185,18 +281,27 @@ export function AIPanel({ aiAvailable }) {
             <p>
               {isProviderAvailable
                 ? `Click "Run Analysis" to get professional insights from AXIOM. Using ${providerLabel}${modelLabel ? ` (${modelLabel})` : ''}.`
-                : 'No AI provider available. Add GEMINI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, or GROQ_API_KEY in backend/.env and restart the server.'}
+                : 'No AI provider available. Configure AGENTROUTER_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY in Settings or backend/.env.'}
             </p>
           </div>
         )}
 
         {loading && (
-          <div className="shimmer-lines">
-            <div className="shimmer-line" />
-            <div className="shimmer-line" />
-            <div className="shimmer-line" />
-            <div className="shimmer-line" />
-            <div className="shimmer-line" />
+          <div>
+            <div className="shimmer-lines">
+              <div className="shimmer-line" />
+              <div className="shimmer-line" />
+              <div className="shimmer-line" />
+              <div className="shimmer-line" />
+              <div className="shimmer-line" />
+            </div>
+            <p style={{
+              textAlign: 'center', color: 'var(--text-3)',
+              fontSize: '0.78rem', fontFamily: 'var(--mono)',
+              marginTop: '12px',
+            }}>
+              AXIOM is analyzing your trades... this may take 30-60 seconds
+            </p>
           </div>
         )}
 

@@ -14,6 +14,7 @@ import json
 import re
 from openai import OpenAI
 from config import (
+    AGENTROUTER_API_KEY, AGENTROUTER_BASE_URL,
     NVIDIA_API_KEY, ZAI_API_KEY,
     GEMINI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY,
     VISION_PROVIDER, VISION_MODEL, AI_PROVIDER, AI_MODEL,
@@ -142,23 +143,50 @@ CRITICAL RULES:
 - Think in terms of: Liquidity Sweep -> Displacement -> FVG -> Entry -> SL below inducement -> TP at opposing liquidity
 - EVERY field must be filled. Do not return empty arrays or empty strings."""
 
-# --- Vision provider registry ---
-# (key, provider_name, base_url, default_vision_model)
-_VISION_PROVIDERS = [
-    (NVIDIA_API_KEY,     "nvidia",      "https://integrate.api.nvidia.com/v1",                         "meta/llama-3.2-11b-vision-instruct"),
-    (GEMINI_API_KEY,     "gemini",      "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
-    (OPENAI_API_KEY,     "openai",      "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
-    (OPENROUTER_API_KEY, "openrouter",  "https://openrouter.ai/api/v1/",                               "google/gemini-flash-1.5"),
-]
+def _get_vision_providers():
+    import os
+    from config import (
+        AGENTROUTER_API_KEY, AGENTROUTER_BASE_URL,
+        NVIDIA_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY
+    )
+    agent_key = os.getenv("AGENTROUTER_API_KEY", AGENTROUTER_API_KEY)
+    agent_url = os.getenv("AGENTROUTER_BASE_URL", AGENTROUTER_BASE_URL) or "https://agentrouter.org/v1/"
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", OPENROUTER_API_KEY)
+    openai_key = os.getenv("OPENAI_API_KEY", OPENAI_API_KEY)
+    gemini_key = os.getenv("GEMINI_API_KEY", GEMINI_API_KEY)
+    nvidia_key = os.getenv("NVIDIA_API_KEY", NVIDIA_API_KEY)
 
-# Text provider registry for coaching pass (same as AIAnalyzer)
-_TEXT_PROVIDERS = [
-    (GEMINI_API_KEY,     "gemini",      "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
-    (OPENAI_API_KEY,     "openai",      "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
-    (OPENROUTER_API_KEY, "openrouter",  "https://openrouter.ai/api/v1/",                               "openai/gpt-4o-mini"),
-    (GROQ_API_KEY,       "groq",        "https://api.groq.com/openai/v1/",                             "llama-3.1-8b-instant"),
-    (ZAI_API_KEY,        "zai",         "https://api.z.ai/api/paas/v4/",                               "glm-4-flash"),
-]
+    return [
+        (agent_key,      "agentrouter",  agent_url,                                                     "gpt-6.1-sol"),
+        (openrouter_key, "openrouter",   "https://openrouter.ai/api/v1/",                               "openai/gpt-4o-mini"),
+        (openai_key,     "openai",       "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
+        (gemini_key,     "gemini",       "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
+        (nvidia_key,     "nvidia",       "https://integrate.api.nvidia.com/v1",                         "meta/llama-3.2-11b-vision-instruct"),
+    ]
+
+
+def _get_text_providers():
+    import os
+    from config import (
+        AGENTROUTER_API_KEY, AGENTROUTER_BASE_URL,
+        GEMINI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY, ZAI_API_KEY
+    )
+    agent_key = os.getenv("AGENTROUTER_API_KEY", AGENTROUTER_API_KEY)
+    agent_url = os.getenv("AGENTROUTER_BASE_URL", AGENTROUTER_BASE_URL) or "https://agentrouter.org/v1/"
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", OPENROUTER_API_KEY)
+    openai_key = os.getenv("OPENAI_API_KEY", OPENAI_API_KEY)
+    gemini_key = os.getenv("GEMINI_API_KEY", GEMINI_API_KEY)
+    groq_key = os.getenv("GROQ_API_KEY", GROQ_API_KEY)
+    zai_key = os.getenv("ZAI_API_KEY", ZAI_API_KEY)
+
+    return [
+        (agent_key,      "agentrouter",  agent_url,                                                     "gpt-6.1-sol"),
+        (openrouter_key, "openrouter",   "https://openrouter.ai/api/v1/",                               "openai/gpt-4o-mini"),
+        (openai_key,     "openai",       "https://api.openai.com/v1/",                                  "gpt-4o-mini"),
+        (gemini_key,     "gemini",       "https://generativelanguage.googleapis.com/v1beta/openai/",    "gemini-1.5-flash"),
+        (groq_key,       "groq",         "https://api.groq.com/openai/v1/",                             "llama-3.1-8b-instant"),
+        (zai_key,        "zai",          "https://api.z.ai/api/paas/v4/",                               "glm-4-flash"),
+    ]
 
 
 class VisionAnalyzer:
@@ -173,13 +201,128 @@ class VisionAnalyzer:
         self._coaching_model = ""
         self._init_clients()
 
+    def _normalize_model(self, raw_model: str) -> str:
+        m_low = (raw_model or "").lower().strip()
+        if m_low in ("opus 4-8", "opus-4-8", "claude-opus-4-8", "opus4-8"):
+            return "claude-opus-5-5"
+        elif m_low in ("opus 5", "opus-5", "claude-opus-5", "opus5", "claude-opus-5-5", "opus 5-5"):
+            return "claude-opus-5-5"
+        elif m_low in ("gemini astra", "gemini-astra", "gpt-6-astra", "astra"):
+            return "gpt-6-astra"
+        elif m_low in ("deepseek", "deepseek-flash", "deepseek-v4-flash"):
+            return "deepseek-v4-flash"
+        elif m_low in ("sol", "gpt-6.1-sol"):
+            return "gpt-6.1-sol"
+        return raw_model
+
+    def _call_responses_endpoint(self, prompt_text: str, model: str = None) -> str:
+        """Call AgentRouter /v1/responses endpoint for models requiring OpenAI Responses API."""
+        import json, ssl, urllib.request
+        base = getattr(self, "_coaching_base_url", "https://agentrouter.org/v1/").rstrip("/")
+        if base.endswith("/v1"):
+            url = base + "/responses"
+        elif not base.endswith("/responses"):
+            url = base + "/v1/responses"
+        else:
+            url = base
+
+        req_model = model or getattr(self, "_coaching_model", "") or "gpt-6.1-sol"
+        headers = {
+            "Authorization": f"Bearer {getattr(self, '_coaching_key', '')}",
+            "User-Agent": "codex_cli_rs/0.149.1",
+            "Originator": "codex_cli_rs",
+            "Content-Type": "application/json"
+        }
+        payload = {"model": req_model, "input": prompt_text}
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, context=ctx, timeout=180) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                for item in data.get("output", []):
+                    if item.get("type") == "message":
+                        for c in item.get("content", []):
+                            if c.get("type") == "output_text":
+                                return c.get("text", "")
+        except Exception as e:
+            logger.warning(f"Coaching responses call failed ({req_model}): {e}")
+        return ""
+
+    def _call_vision_responses_endpoint(self, prompt_text: str, image_base64: str, model: str = None) -> str:
+        """Call AgentRouter /v1/responses endpoint with image input for multimodal models."""
+        import json, ssl, urllib.request, time
+        base = getattr(self, "_coaching_base_url", "https://agentrouter.org/v1/").rstrip("/")
+        if base.endswith("/v1"):
+            url = base + "/responses"
+        elif not base.endswith("/responses"):
+            url = base + "/v1/responses"
+        else:
+            url = base
+
+        target_model = model or getattr(self, "_vision_model", "") or "gpt-6.1-sol"
+        headers = {
+            "Authorization": f"Bearer {getattr(self, '_coaching_key', '')}",
+            "User-Agent": "codex_cli_rs/0.149.1",
+            "Originator": "codex_cli_rs",
+            "Content-Type": "application/json"
+        }
+        full_prompt = f"{VISION_READ_PROMPT}\n\n{prompt_text}"
+        payload = {
+            "model": target_model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": full_prompt},
+                        {"type": "input_image", "image_url": f"data:image/png;base64,{image_base64}"}
+                    ]
+                }
+            ]
+        }
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        for attempt in range(2):
+            try:
+                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+                with urllib.request.urlopen(req, context=ctx, timeout=180) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    for item in data.get("output", []):
+                        if item.get("type") == "message":
+                            for c in item.get("content", []):
+                                if c.get("type") == "output_text":
+                                    return c.get("text", "")
+                return ""
+            except Exception as e:
+                logger.warning(f"Vision responses call failed ({target_model}): {e}")
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                return ""
+
     def _init_clients(self):
         """Initialise vision and coaching clients from available provider keys."""
-        forced_vision = VISION_PROVIDER
-        forced_text   = AI_PROVIDER
+        import os
+        from config import VISION_PROVIDER, VISION_MODEL, AI_PROVIDER, AI_MODEL
+
+        forced_vision = os.getenv("VISION_PROVIDER", VISION_PROVIDER).lower().strip()
+        custom_vmodel = os.getenv("VISION_MODEL", VISION_MODEL).strip()
+        forced_text   = os.getenv("AI_PROVIDER", AI_PROVIDER).lower().strip()
+        custom_tmodel = os.getenv("AI_MODEL", AI_MODEL).strip()
+
+        self._vision_client = None
+        self._vision_provider = "none"
+        self._vision_model = ""
+        self._coaching_client = None
+        self._coaching_provider = "none"
+        self._coaching_model = ""
+        self._coaching_key = ""
+        self._coaching_base_url = ""
 
         # ── Vision client ──
-        for key_val, name, base_url, default_model in _VISION_PROVIDERS:
+        for key_val, name, base_url, default_model in _get_vision_providers():
             if forced_vision and name != forced_vision:
                 continue
             if not key_val:
@@ -188,31 +331,45 @@ class VisionAnalyzer:
             if name == "nvidia" and not key_val.startswith("nvapi-"):
                 continue
             try:
-                self._vision_client = OpenAI(api_key=key_val, base_url=base_url)
+                client_kwargs = {"api_key": key_val, "base_url": base_url}
+                if name == "agentrouter" or "agentrouter" in str(base_url).lower():
+                    client_kwargs["default_headers"] = {
+                        "User-Agent": "codex_cli_rs/0.149.1",
+                        "Originator": "codex_cli_rs",
+                    }
+                self._vision_client = OpenAI(**client_kwargs)
                 self._vision_provider = name
-                self._vision_model = VISION_MODEL or default_model
+                self._vision_model = self._normalize_model(custom_vmodel or default_model)
                 logger.info(f"VisionAnalyzer vision client: provider={name}, model={self._vision_model}")
                 break
             except Exception as e:
                 logger.warning(f"VisionAnalyzer: failed to init vision {name}: {e}")
 
         # ── Coaching (text) client ──
-        for key_val, name, base_url, default_model in _TEXT_PROVIDERS:
+        for key_val, name, base_url, default_model in _get_text_providers():
             if forced_text and name != forced_text:
                 continue
             if not key_val:
                 continue
             try:
-                self._coaching_client = OpenAI(api_key=key_val, base_url=base_url)
+                client_kwargs = {"api_key": key_val, "base_url": base_url}
+                if name == "agentrouter" or "agentrouter" in str(base_url).lower():
+                    client_kwargs["default_headers"] = {
+                        "User-Agent": "codex_cli_rs/0.149.1",
+                        "Originator": "codex_cli_rs",
+                    }
+                self._coaching_client = OpenAI(**client_kwargs)
                 self._coaching_provider = name
-                self._coaching_model = AI_MODEL or default_model
+                self._coaching_key = key_val
+                self._coaching_base_url = base_url
+                self._coaching_model = self._normalize_model(custom_tmodel or default_model)
                 logger.info(f"VisionAnalyzer coaching client: provider={name}, model={self._coaching_model}")
                 break
             except Exception as e:
                 logger.warning(f"VisionAnalyzer: failed to init coaching {name}: {e}")
 
         if not self._vision_client:
-            logger.warning("VisionAnalyzer: no vision provider available. Add NVIDIA_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY.")
+            logger.warning("VisionAnalyzer: no vision provider available. Add AGENTROUTER_API_KEY, OPENROUTER_API_KEY, NVIDIA_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY.")
         if not self._coaching_client:
             logger.warning("VisionAnalyzer: no coaching provider available.")
 
@@ -284,29 +441,61 @@ class VisionAnalyzer:
 
         # Build the multimodal message (OpenAI-compatible format)
         def _call():
-            return self._vision_client.chat.completions.create(
-                model=self._vision_model,
-                messages=[
-                    {"role": "system", "content": VISION_READ_PROMPT},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_text},
+            models_to_try = [self._vision_model or "gpt-6.1-sol"]
+            if self._vision_provider == "agentrouter":
+                for fb in ["gpt-6.1-sol", "gpt-6-astra"]:
+                    if fb not in models_to_try:
+                        models_to_try.append(fb)
+
+            last_err = None
+            for m in models_to_try:
+                try:
+                    if m in ("gpt-6-astra", "gpt-6.1-sol") or self._vision_provider == "agentrouter":
+                        ans = self._call_vision_responses_endpoint(user_text, image_base64, model=m)
+                        if ans:
+                            return ans
+                    resp = self._vision_client.chat.completions.create(
+                        model=m,
+                        messages=[
+                            {"role": "system", "content": VISION_READ_PROMPT},
                             {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{image_base64}"
-                                },
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": user_text},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{image_base64}"
+                                        },
+                                    },
+                                ],
                             },
                         ],
-                    },
-                ],
-                temperature=0.3,
-                max_tokens=3000,
-            )
+                        temperature=0.3,
+                        max_tokens=3000,
+                    )
+                    choice = resp.choices[0].message
+                    content = choice.content or ""
+                    if not content and hasattr(choice, "reasoning_content") and choice.reasoning_content:
+                        content = choice.reasoning_content
+                    if content:
+                        return content
+                except Exception as e:
+                    last_err = e
+                    err_str = str(e)
+                    if "responses" in err_str.lower() or "400" in err_str:
+                        ans = self._call_vision_responses_endpoint(user_text, image_base64, model=m)
+                        if ans:
+                            return ans
+                    if "403" in err_str or "无权访问" in err_str or "not support" in err_str.lower() or "不支持" in err_str or "无可用渠道" in err_str:
+                        logger.warning(f"Vision model '{m}' unavailable ({err_str[:60]}), trying fallback model...")
+                        continue
+                    raise
+            if last_err:
+                raise last_err
 
-        response = await asyncio.to_thread(_call)
-        return response.choices[0].message.content
+        response_content = await asyncio.to_thread(_call)
+        return response_content
 
     async def _pass2_coaching(self, vision_analysis: str, symbol: str,
                                timeframe: str, context: str) -> dict:
@@ -319,18 +508,50 @@ class VisionAnalyzer:
         )
 
         def _call():
-            return self._coaching_client.chat.completions.create(
-                model=self._coaching_model,
-                messages=[
-                    {"role": "system", "content": "You are AXIOM, an elite SMC trading coach. Return ONLY valid JSON."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.4,
-                max_tokens=4096,
-            )
+            models_to_try = [self._coaching_model or "gpt-6.1-sol"]
+            if self._coaching_provider == "agentrouter":
+                for fb in ["gpt-6.1-sol", "gpt-6-astra"]:
+                    if fb not in models_to_try:
+                        models_to_try.append(fb)
 
-        response = await asyncio.to_thread(_call)
-        raw_text = response.choices[0].message.content
+            last_err = None
+            for m in models_to_try:
+                try:
+                    if m in ("gpt-6-astra", "gpt-6.1-sol"):
+                        ans = self._call_responses_endpoint(prompt, model=m)
+                        if ans:
+                            return ans
+                    resp = self._coaching_client.chat.completions.create(
+                        model=m,
+                        messages=[
+                            {"role": "system", "content": "You are AXIOM, an elite SMC trading coach. Return ONLY valid JSON."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.4,
+                        max_tokens=4096,
+                    )
+                    choice = resp.choices[0].message
+                    content = choice.content or ""
+                    if not content and hasattr(choice, "reasoning_content") and choice.reasoning_content:
+                        content = choice.reasoning_content
+                    if content:
+                        return content
+                except Exception as e:
+                    last_err = e
+                    err_str = str(e)
+                    if "responses" in err_str.lower():
+                        logger.info(f"Pass 2 model {m} requires /v1/responses endpoint, retrying...")
+                        ans = self._call_responses_endpoint(prompt)
+                        if ans:
+                            return ans
+                    if "403" in err_str or "无权访问" in err_str or "not have permission" in err_str.lower():
+                        logger.warning(f"Coaching model '{m}' not authorized (403), falling back...")
+                        continue
+                    raise
+            if last_err:
+                raise last_err
+
+        raw_text = await asyncio.to_thread(_call)
 
         # Parse JSON from response
         analysis = self._parse_json_response(raw_text)

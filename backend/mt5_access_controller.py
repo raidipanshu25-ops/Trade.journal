@@ -246,6 +246,8 @@ class MT5AccessController:
             WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
 
             def enum_callback(hwnd, lparam):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
                 pid = ctypes.wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 try:
@@ -253,9 +255,9 @@ class MT5AccessController:
                     proc = psutil.Process(pid.value)
                     if "terminal64" in proc.name().lower():
                         title_len = user32.GetWindowTextLengthW(hwnd)
-                        if title_len > 0:
+                        if title_len > 2:
                             found_hwnd[0] = hwnd
-                            return False  # found the visible main window
+                            return False  # found the real visible main window
                 except Exception:
                     pass
                 return True
@@ -278,8 +280,18 @@ class MT5AccessController:
             self._state["mt5_is_open"] = True
             return True
 
-        # If MT5 is running but has no visible GUI window (e.g. started in background by mt5.initialize()),
-        # or if MT5 is not running at all, launch terminal64.exe as a visible GUI app
+        # No visible GUI window found!
+        # If MT5 was started in background/headless mode, terminate the headless instance
+        # so Windows and MetaTrader allow the real desktop GUI window to open without mutex conflicts.
+        try:
+            import psutil
+            for proc in psutil.process_iter(["name", "pid"]):
+                if "terminal64" in (proc.info.get("name") or "").lower():
+                    proc.kill()
+            time.sleep(1)
+        except Exception:
+            pass
+
         if not self._mt5_exe_path or not Path(self._mt5_exe_path).exists():
             self._add_log("⚠️ Cannot open MT5 — terminal64.exe path not found")
             return False
@@ -291,6 +303,7 @@ class MT5AccessController:
             except Exception:
                 subprocess.Popen(
                     [self._mt5_exe_path],
+                    cwd=str(Path(self._mt5_exe_path).parent),
                     shell=False,
                     close_fds=True,
                 )

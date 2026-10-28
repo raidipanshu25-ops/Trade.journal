@@ -1,0 +1,80 @@
+{
+  "2026-10-20": {
+    "completed": true,
+    "completed_at": "2026-10-20T14:36:57.978937+00:00",
+    "intention": "m,fjk;wfjl'zxd",
+    "rules_confirmed": [
+      "Max lot size: 0.5 lots",
+      "Max daily loss: 0.8%",
+      "Trade asia session only (05:30\u201312:00), max 1 trade(s)",
+      "Trade newyork session only (19:00\u201322:00), max 1 trade(s)",
+      "Trade london session only (13:00\u201316:30), max 1 trade(s)"
+    ],
+    "user": "anonymous"
+  },
+  "2026-10-21": {
+    "completed": true,
+    "completed_at": "2026-10-21T01:46:44.220446+00:00",
+    "intention": "A single process to follow the discipline what i made\n",
+    "rules_confirmed": [
+      "Max lot size: 0.5 lots",
+      "Max daily loss: 0.8%",
+      "Trade asia session only (05:30\u201312:00), max 1 trade(s)",
+      "Trade london session only (13:00\u201316:30), max 1 trade(s)",
+      "Trade newyork session only (19:00\u201322:00), max 1 trade(s)"
+    ],
+    "user": "anonymous"
+  },
+  "2026-10-22": {
+    "completed": true,
+    "completed_at": "2026-10-22T02:53:03.728578+00:00",
+    "intention": "I am really happy that I have followed the process yesterday.\nFor today,I will follow the same play .",
+    "rules_confirmed": [
+      "Max lot size: 0.5 lots",
+      "Max daily loss: 0.8%",
+      "Trade asia session only (05:30\u201312:00), max 1 trade(s)",
+      "Trade london session only (13:00\u201316:30), max 1 trade(s)",
+      "Trade newyork session only (19:00\u201322:00), max 1 trade(s)"
+    ],
+    "user": "anonymous"
+  },
+  "2026-10-26": {
+    "completed": true,
+    "completed_at": "2026-10-26T04:38:17.694491+00:00",
+    "intention": "My process is simple ,just follow the discipline what i made\n",
+    "rules_confirmed": [
+      "Max lot size: 0.5 lots",
+      "Max daily loss: 0.8%",
+      "Trade asia session only (05:30\u201312:00), max 1 trade(s)",
+      "Trade london session only (13:00\u201316:30), max 1 trade(s)",
+      "Trade newyork session only (19:00\u201322:00), max 1 trade(s)"
+    ],
+    "user": "local"
+  },
+  "2026-10-27": {
+    "completed": true,
+    "completed_at": "2026-10-27T06:59:44.737060+00:00",
+    "intention": "continue\n",
+    "rules_confirmed": [
+      "Max lot size: 0.5 lots",
+      "Max daily loss: 0.8%",
+      "Trade asia session only (05:30\u201312:00), max 1 trade(s)",
+      "Trade london session only (13:00\u201316:30), max 1 trade(s)",
+      "Trade newyork session only (19:00\u201322:00), max 1 trade(s)"
+    ],
+    "user": "local"
+  },
+  "2026-10-28": {
+    "completed": true,
+    "completed_at": "2026-10-28T03:09:46.663586+00:00",
+    "intention": "Just to follow the process what i made\n",
+    "rules_confirmed": [
+      "Max lot size: 0.5 lots",
+      "Max daily loss: 0.8%",
+      "Trade asia session only (05:30\u201312:00), max 1 trade(s)",
+      "Trade london session only (13:00\u201316:30), max 1 trade(s)",
+      "Trade newyork session only (19:00\u201322:00), max 1 trade(s)"
+    ],
+    "user": "local"
+  }
+}

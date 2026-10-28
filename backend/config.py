@@ -15,7 +15,7 @@ try:
 except ImportError:
     pytz = None
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env", override=True)
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 
@@ -136,16 +136,21 @@ def get_local_tz():
 
 
 # ── AI Provider Configuration ────────────────────────────────────────
-# Set AI_PROVIDER to one of: "gemini", "openai", "openrouter", "groq", "huggingface", "zhipu", "zai"
+# Set AI_PROVIDER to one of: "agentrouter", "openrouter", "openai", "gemini", "groq", "huggingface", "zhipu", "zai"
 # Leave blank to auto-detect the first available provider.
 AI_PROVIDER  = os.getenv("AI_PROVIDER", "").lower().strip()
 AI_MODEL     = os.getenv("AI_MODEL", "")  # leave blank for provider default
 
-# Vision provider: "nvidia", "gemini", "openai", "openrouter" or blank for auto
+# Vision provider: "agentrouter", "openrouter", "nvidia", "gemini", "openai" or blank for auto
 VISION_PROVIDER = os.getenv("VISION_PROVIDER", "").lower().strip()
 VISION_MODEL    = os.getenv("VISION_MODEL", "")  # leave blank for provider default
 
 # API Keys — populate whichever provider(s) you have access to
+AGENTROUTER_API_KEY  = os.getenv("AGENTROUTER_API_KEY", "")    # AgentRouter (agentrouter.org / co.agentrouter.org)
+AGENTROUTER_BASE_URL = os.getenv("AGENTROUTER_BASE_URL", "https://co.agentrouter.org/v1").strip()
+if AGENTROUTER_BASE_URL and not AGENTROUTER_BASE_URL.endswith("/"):
+    AGENTROUTER_BASE_URL += "/"
+
 ZAI_API_KEY        = os.getenv("ZAI_API_KEY", "")          # Z.ai / Zhipu GLM
 NVIDIA_API_KEY     = os.getenv("NVIDIA_API_KEY", "")       # NVIDIA NIM (vision — llama-3.2-11b)
 NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY", "")   # NVIDIA NIM (text — Llama3.3 Thinking)

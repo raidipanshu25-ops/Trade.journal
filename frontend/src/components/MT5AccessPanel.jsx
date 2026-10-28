@@ -31,21 +31,21 @@ function SessionCard({ name, data }) {
 
   return (
     <div style={{
-      padding: '10px 12px',
-      borderRadius: '6px',
-      border: '1px solid var(--border)',
-      background: 'var(--bg-3)',
+      padding: '12px 14px',
+      borderRadius: '8px',
+      border: '1px solid rgba(255, 255, 255, 0.12)',
+      background: 'rgba(255, 255, 255, 0.03)',
       display: 'flex',
       flexDirection: 'column',
-      gap: '4px',
+      gap: '5px',
     }}>
-      <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-0)' }}>
+      <div style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-0)', letterSpacing: '0.3px' }}>
         {meta.label}
       </div>
-      <div style={{ fontSize: '0.65rem', color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>
+      <div style={{ fontSize: '0.80rem', color: 'var(--text-1)', fontFamily: 'var(--mono)', fontWeight: 500 }}>
         {meta.time}
       </div>
-      <div style={{ fontSize: '0.7rem', color: statusColor, fontWeight: 600, marginTop: '2px', fontFamily: 'var(--mono)' }}>
+      <div style={{ fontSize: '0.86rem', color: statusColor, fontWeight: 700, marginTop: '2px', fontFamily: 'var(--mono)' }}>
         {statusLabel}
       </div>
     </div>
@@ -167,7 +167,7 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
                 }}>Override</span>
               )}
             </div>
-            <div style={{ fontSize: '0.68rem', color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: '1px' }}>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-2)', fontFamily: 'var(--mono)', marginTop: '2px', fontWeight: 500 }}>
               {status.current_time}
             </div>
           </div>
@@ -176,18 +176,18 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
         {/* Status badge */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: '6px',
-          padding: '4px 10px', borderRadius: '4px',
+          padding: '5px 12px', borderRadius: '6px',
           background: isOpen ? 'var(--green-dim)' : 'var(--red-dim)',
           border: `1px solid ${isOpen ? 'var(--green-border)' : 'var(--red-border)'}`,
         }}>
           <div style={{
-            width: '6px', height: '6px', borderRadius: '50%',
-            background: isOpen ? 'var(--green)' : 'var(--red)',
+            width: '7px', height: '7px', borderRadius: '50%',
+            background: isOpen ? 'var(--green-bright)' : 'var(--red-bright)',
           }} />
           <span style={{
-            fontSize: '0.68rem', fontWeight: 700, fontFamily: 'var(--mono)',
-            color: isOpen ? 'var(--green)' : 'var(--red)',
-            textTransform: 'uppercase', letterSpacing: '0.5px',
+            fontSize: '0.75rem', fontWeight: 800, fontFamily: 'var(--mono)',
+            color: isOpen ? 'var(--green-bright)' : 'var(--red-bright)',
+            textTransform: 'uppercase', letterSpacing: '0.8px',
           }}>
             {isOpen ? 'Open' : 'Closed'}
           </span>
@@ -196,34 +196,34 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
 
       {/* Reason line */}
       <div style={{
-        fontSize: '0.78rem', color: 'var(--text-1)', marginBottom: '14px',
-        padding: '8px 12px', background: 'var(--bg-3)',
-        borderRadius: '5px', border: '1px solid var(--border)',
-        lineHeight: 1.5,
+        fontSize: '0.84rem', color: 'var(--text-0)', marginBottom: '14px',
+        padding: '10px 14px', background: 'rgba(255,255,255,0.03)',
+        borderRadius: '6px', border: '1px solid rgba(255,255,255,0.1)',
+        lineHeight: 1.5, fontWeight: 500,
       }}>
         {status.reason || '—'}
       </div>
 
       {/* Session cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '12px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '14px' }}>
         <SessionCard name="asia"    data={status.sessions?.asia} />
         <SessionCard name="london"  data={status.sessions?.london} />
         <SessionCard name="newyork" data={status.sessions?.newyork} />
       </div>
 
       {/* Daily P&L + Next session row */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
           <div>
-            <div style={{ fontSize: '0.62rem', color: 'var(--text-3)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Daily P&L</div>
+            <div style={{ fontSize: '0.74rem', color: 'var(--text-2)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: '0.8px', fontWeight: 700 }}>Daily P&L</div>
             <div style={{
-              fontSize: '0.88rem', fontWeight: 600, fontFamily: 'var(--mono)',
-              color: pnlPositive ? 'var(--green)' : 'var(--red)',
+              fontSize: '1.05rem', fontWeight: 700, fontFamily: 'var(--mono)',
+              color: pnlPositive ? 'var(--green-bright)' : 'var(--red-bright)',
               marginTop: '2px',
             }}>
               {pnlPositive ? '+' : ''}{pnl.toFixed(2)}
               {status.daily_loss_pct > 0 && (
-                <span style={{ fontSize: '0.62rem', color: 'var(--red)', marginLeft: '5px' }}>
+                <span style={{ fontSize: '0.78rem', color: 'var(--red-bright)', marginLeft: '6px', fontWeight: 600 }}>
                   ({status.daily_loss_pct.toFixed(2)}%)
                 </span>
               )}
@@ -231,22 +231,22 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
           </div>
         </div>
         {!isOpen && status.next_session_open && (
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>
-            Next: <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{status.next_session_open}</span>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-1)', fontFamily: 'var(--mono)', fontWeight: 500 }}>
+            Next: <span style={{ color: 'var(--accent)', fontWeight: 700 }}>{status.next_session_open}</span>
           </div>
         )}
       </div>
 
       {/* Controls */}
-      <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
         {isOpen && (
           <button
             className="btn btn-secondary"
             onClick={() => handleOverride('close')}
             disabled={overrideLoading === 'close'}
             style={{
-              fontSize: '0.73rem', padding: '5px 12px',
-              background: 'var(--red-dim)', color: 'var(--red)',
+              fontSize: '0.78rem', padding: '6px 14px', fontWeight: 600,
+              background: 'var(--red-dim)', color: 'var(--red-bright)',
               borderColor: 'var(--red-border)',
             }}
             id="mt5-force-close"
@@ -260,9 +260,9 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
             onClick={() => handleOverride('open')}
             disabled={overrideLoading === 'open' || status.force_open_disabled}
             style={{
-              fontSize: '0.73rem', padding: '5px 12px',
+              fontSize: '0.78rem', padding: '6px 14px', fontWeight: 600,
               background: status.force_open_disabled ? 'var(--bg-3)' : 'var(--green-dim)',
-              color: status.force_open_disabled ? 'var(--text-3)' : 'var(--green)',
+              color: status.force_open_disabled ? 'var(--text-3)' : 'var(--green-bright)',
               borderColor: status.force_open_disabled ? 'var(--border)' : 'var(--green-border)',
               cursor: status.force_open_disabled ? 'not-allowed' : 'pointer',
             }}
@@ -278,10 +278,10 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
             onClick={handleForceOpen}
             disabled={true}
             style={{
-              fontSize: '0.73rem', padding: '5px 12px',
+              fontSize: '0.78rem', padding: '6px 14px', fontWeight: 600,
               background: 'var(--bg-3)', color: 'var(--text-3)',
               borderColor: 'var(--border)', cursor: 'not-allowed',
-              opacity: 0.5,
+              opacity: 0.6,
             }}
             title="Force Open already used in this session"
             id="mt5-emergency-override"
@@ -292,9 +292,9 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
         {/* Show remaining extra trades when force-open is active */}
         {isOpen && status.force_open_active_session && status.force_open_extra_remaining > 0 && (
           <div style={{
-            fontSize: '0.68rem', padding: '4px 10px', borderRadius: '4px',
+            fontSize: '0.74rem', padding: '5px 12px', borderRadius: '5px',
             background: 'var(--amber-dim)', border: '1px solid var(--amber-border)',
-            color: 'var(--amber)', fontFamily: 'var(--mono)', fontWeight: 600,
+            color: 'var(--amber)', fontFamily: 'var(--mono)', fontWeight: 700,
           }}>
             🚨 {status.force_open_extra_remaining} extra trade(s) remaining
           </div>
@@ -303,7 +303,7 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
           <button
             className="btn btn-secondary"
             onClick={() => handleOverride('clear')}
-            style={{ fontSize: '0.73rem', padding: '5px 12px' }}
+            style={{ fontSize: '0.78rem', padding: '6px 14px', fontWeight: 600 }}
             id="mt5-clear-override"
           >
             Auto Mode
@@ -313,7 +313,7 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
           className="btn btn-secondary"
           onClick={handleReset}
           disabled={loading}
-          style={{ fontSize: '0.68rem', padding: '4px 9px', opacity: 0.5 }}
+          style={{ fontSize: '0.74rem', padding: '5px 12px', opacity: 0.85, fontWeight: 500 }}
           title="Reset daily state (testing)"
           id="mt5-reset-day"
         >
@@ -324,29 +324,29 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
       {/* MT5 exe warning */}
       {!status.mt5_exe_found && (
         <div style={{
-          marginTop: '10px', padding: '7px 11px', borderRadius: '5px',
+          marginTop: '12px', padding: '8px 12px', borderRadius: '6px',
           background: 'var(--amber-dim)', border: '1px solid var(--amber-border)',
-          fontSize: '0.7rem', color: 'var(--amber)', lineHeight: 1.5,
+          fontSize: '0.76rem', color: 'var(--amber)', lineHeight: 1.5,
         }}>
-          MT5 executable not found. Set <code style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem' }}>MT5_PATH</code> in backend <code style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem' }}>.env</code>.
+          MT5 executable not found. Set <code style={{ fontFamily: 'var(--mono)', fontSize: '0.74rem' }}>MT5_PATH</code> in backend <code style={{ fontFamily: 'var(--mono)', fontSize: '0.74rem' }}>.env</code>.
         </div>
       )}
 
       {/* Event Log */}
       {status.log && status.log.length > 0 && (
-        <details style={{ marginTop: '10px' }}>
-          <summary style={{ fontSize: '0.68rem', color: 'var(--text-3)', cursor: 'pointer', userSelect: 'none', fontFamily: 'var(--mono)' }}>
+        <details style={{ marginTop: '12px' }}>
+          <summary style={{ fontSize: '0.78rem', color: 'var(--text-2)', cursor: 'pointer', userSelect: 'none', fontFamily: 'var(--mono)', fontWeight: 600 }}>
             Event Log ({status.log.length})
           </summary>
           <div style={{
-            marginTop: '5px', maxHeight: '100px', overflowY: 'auto',
-            background: 'var(--bg-3)', borderRadius: '5px', padding: '6px 8px',
+            marginTop: '6px', maxHeight: '120px', overflowY: 'auto',
+            background: 'var(--bg-3)', borderRadius: '6px', padding: '8px 10px',
             border: '1px solid var(--border)',
           }}>
             {[...status.log].reverse().map((entry, i) => (
               <div key={i} style={{
-                fontSize: '0.65rem', color: 'var(--text-2)', fontFamily: 'var(--mono)',
-                padding: '1px 0', lineHeight: 1.4,
+                fontSize: '0.74rem', color: 'var(--text-1)', fontFamily: 'var(--mono)',
+                padding: '2px 0', lineHeight: 1.5,
               }}>
                 {entry}
               </div>
