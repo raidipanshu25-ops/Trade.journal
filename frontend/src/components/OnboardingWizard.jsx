@@ -236,7 +236,7 @@ export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip })
                   </div>
                 </li>
                 <li>
-                  <div><strong>Download & extract</strong> the MT5 Connector package:</div>
+                  <div><strong>Download & extract</strong> the MT5 Connector package (One-time setup):</div>
                   <div style={{ marginTop: '8px' }}>
                     <button 
                       onClick={handleDownloadConnector}
@@ -259,15 +259,18 @@ export function OnboardingWizard({ syncToken, isConnected, onComplete, onSkip })
                       {downloading ? 'Downloading...' : 'Download MT5 Connector (.zip)'}
                     </button>
                   </div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-2)', marginTop: '4px' }}>
+                    💡 You only need to download this ONCE on this PC.
+                  </div>
                 </li>
                 <li>
                   Extract the zip, then <strong>double-click</strong> <code style={{ fontFamily: 'var(--mono)', color: 'var(--cyan)', background: 'var(--bg-0)', padding: '2px 6px', borderRadius: '4px' }}>run_connector.bat</code>
                   <div style={{ fontSize: '0.78rem', color: 'var(--text-2)', marginTop: '4px' }}>
-                    Or open terminal in the folder and run: <code style={{ fontFamily: 'var(--mono)', color: 'var(--text-0)' }}>python local_sync_agent.py</code>
+                    This automatically registers the 1-click launcher and creates a desktop shortcut.
                   </div>
                 </li>
                 <li>
-                  Keep the connector terminal open while MetaTrader 5 is running.
+                  In future sessions, you never need to download again — simply click <strong>"Start Session & Connect MT5"</strong> from your dashboard!
                 </li>
               </ol>
             </div>

@@ -149,6 +149,62 @@ function App() {
     }).catch(() => {});
   }, [isAuthenticated, onboardingDismissed]);
 
+  // ── Session & 1-Click Connection Handlers ─────────────────────────
+  const [sessionStarting, setSessionStarting] = useState(false);
+  const [sessionMessage, setSessionMessage]   = useState('');
+  const hasDownloadedBefore = Boolean(
+    localStorage.getItem('tj-connector-downloaded') === 'true' || syncToken
+  );
+
+  const handleStartSession = useCallback(async () => {
+    setSessionStarting(true);
+    setSessionMessage('Establishing connection...');
+    try {
+      // 1. Check local connector HTTP listener (port 18500)
+      const localPing = await api.pingLocalConnector();
+      if (localPing && localPing.ok) {
+        await api.startLocalSession();
+        await api.startSession();
+        setSessionMessage('Local agent active! Launching MT5...');
+        setTimeout(() => {
+          setSessionStarting(false);
+          setSessionMessage('');
+          dash.refresh();
+        }, 2000);
+        return;
+      }
+
+      // 2. Try backend session start endpoint
+      const res = await api.startSession();
+      if (res && res.connector_connected) {
+        setSessionMessage('Session signal sent. MT5 starting...');
+        setTimeout(() => {
+          setSessionStarting(false);
+          setSessionMessage('');
+          dash.refresh();
+        }, 2000);
+        return;
+      }
+
+      // 3. Launch via registered Windows protocol handler (tjconnector://start)
+      api.launchConnectorProtocol();
+      setSessionMessage('Opening MT5 Connector on your PC...');
+      setTimeout(() => {
+        setSessionStarting(false);
+        setSessionMessage('');
+        dash.refresh();
+      }, 3500);
+    } catch (err) {
+      console.error('Session start error:', err);
+      api.launchConnectorProtocol();
+      setSessionMessage('Launching connector...');
+      setTimeout(() => {
+        setSessionStarting(false);
+        setSessionMessage('');
+      }, 3000);
+    }
+  }, [dash]);
+
   // ── Pre-Trade Gate ────────────────────────────────────────────────
   const [preTradeGateOpen, setPreTradeGateOpen] = useState(false);
   const preTradeCallbackRef = useRef(null);
@@ -191,7 +247,19 @@ function App() {
   // ── Derived data (memoised — recalculates only when source changes) ─
   const positions     = live.positions;
   const account       = live.account;
-  const mt5Connected  = live.connected || dash.mt5Connected;
+  const isConnectorActive = Boolean(
+    live.connectorConnected ||
+    (appConfig.mt5_mode === 'local') ||
+    syncStatus.connector_connected ||
+    syncStatus.connected
+  );
+  const isMt5Active = Boolean(
+    live.mt5Connected ||
+    (appConfig.mt5_mode === 'local' && (live.connected || dash.mt5Connected))
+  );
+  const mt5Connected  = isMt5Active;
+  const lockReason    = live.lockReason || syncStatus.lock_reason || live.mt5Access?.reason || '';
+  const isLockedOrOutOfSession = isConnectorActive && !isMt5Active;
   const stats         = live.dailyStats  || {};
   const journalStats  = live.journalStats || null;
 
@@ -350,17 +418,21 @@ function App() {
             <div className="page-header">
               <h2>Dashboard</h2>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                {appConfig.mt5_mode === 'sync' && (
-                  <ConnectorStatus
-                    connected={syncStatus.connected}
-                    lastSync={syncStatus.last_sync}
-                    onSetupClick={() => {
-                      setOnboardingDismissed(false);
-                      localStorage.removeItem('tj-onboarding-dismissed');
-                      setShowOnboarding(true);
-                    }}
-                  />
-                )}
+                <ConnectorStatus
+                  connected={isConnectorActive}
+                  connectorConnected={isConnectorActive}
+                  mt5Connected={isMt5Active}
+                  mt5Status={live.mt5Status || syncStatus.mt5_status || 'closed'}
+                  lockReason={lockReason}
+                  lastSync={syncStatus.last_sync}
+                  onStartSession={handleStartSession}
+                  starting={sessionStarting}
+                  onSetupClick={() => {
+                    setOnboardingDismissed(false);
+                    localStorage.removeItem('tj-onboarding-dismissed');
+                    setShowOnboarding(true);
+                  }}
+                />
                 <p>Live MT5 positions and trading performance.</p>
                 <div className={`ws-indicator ${live.wsStatus}`} title={`WebSocket: ${live.wsStatus}`}>
                   <span className="ws-dot" />
@@ -369,58 +441,83 @@ function App() {
               </div>
             </div>
 
-            {!mt5Connected && !dash.loading && appConfig.mt5_mode !== 'sync' && (
-              <div className="connection-banner">
-                <div className="connection-banner-icon">
-                  <svg viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M18.36 5.64a9 9 0 0 1 0 12.73"/>
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-                    <line x1="2" y1="2" x2="22" y2="22"/>
+            {/* 1. When MT5 is closed due to rule violation or out-of-session (Point 3) */}
+            {isLockedOrOutOfSession && (
+              <div className="connection-banner" style={{ background: 'rgba(0, 180, 216, 0.08)', borderColor: 'rgba(0, 180, 216, 0.35)' }}>
+                <div className="connection-banner-icon" style={{ background: 'rgba(0, 180, 216, 0.15)', color: 'var(--cyan)' }}>
+                  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                   </svg>
                 </div>
                 <div className="connection-banner-text">
-                  <h3>MT5 Not Connected</h3>
-                  <p>Make sure MetaTrader 5 is running and click reconnect.</p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <h3 style={{ color: 'var(--text-0)', margin: 0 }}>
+                      {lockReason && lockReason.toLowerCase().includes('outside') ? 'Outside Trading Session' : 'MT5 Closed for Discipline'}
+                    </h3>
+                    <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '4px', background: 'var(--green-dim)', color: 'var(--green-bright)', border: '1px solid var(--green-border)', fontFamily: 'var(--mono)', fontWeight: 600 }}>
+                      🟢 Connection Established
+                    </span>
+                    <span style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: '4px', background: 'var(--amber-dim)', color: 'var(--amber)', border: '1px solid var(--amber-border)', fontFamily: 'var(--mono)', fontWeight: 600 }}>
+                      🔒 MT5 Closed
+                    </span>
+                  </div>
+                  <p style={{ marginTop: '4px', color: 'var(--text-1)' }}>
+                    {lockReason || 'MT5 terminal is closed to protect trading discipline. Your journal connection remains active and synchronizing.'}
+                  </p>
                 </div>
                 <button
-                  className="btn btn-primary"
-                  style={{ marginLeft: 'auto' }}
-                  onClick={async () => { await api.reconnect(); dash.refresh(); }}
-                  id="reconnect-btn"
+                  className="btn btn-secondary"
+                  style={{ marginLeft: 'auto', fontSize: '0.78rem' }}
+                  onClick={handleStartSession}
+                  disabled={sessionStarting}
+                  title="Check session availability or request session activation"
                 >
-                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="23 4 23 10 17 10"/>
-                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                  </svg>
-                  Reconnect
+                  {sessionStarting ? 'Checking…' : 'Re-check Session'}
                 </button>
               </div>
             )}
-            {!syncStatus.connected && !dash.loading && appConfig.mt5_mode === 'sync' && (
+
+            {/* 2. When Connector is offline / trader needs to start session (Point 1 & 2) */}
+            {!isConnectorActive && !dash.loading && (
               <div className="connection-banner">
                 <div className="connection-banner-icon">
                   <svg viewBox="0 0 24 24" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M18.36 5.64a9 9 0 0 1 0 12.73"/>
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-                    <line x1="2" y1="2" x2="22" y2="22"/>
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                   </svg>
                 </div>
                 <div className="connection-banner-text">
-                  <h3>MT5 Connector Not Running</h3>
-                  <p>Start the local MT5 connector script on your PC to sync trades.</p>
+                  <h3 style={{ margin: 0 }}>Start Trading Session</h3>
+                  <p style={{ marginTop: '4px' }}>
+                    {sessionMessage || 'Ready to trade? Click Start Session below to establish connection and launch MT5 on your PC.'}
+                  </p>
                 </div>
-                <button
-                  className="btn btn-primary"
-                  style={{ marginLeft: 'auto' }}
-                  onClick={() => {
-                    setOnboardingDismissed(false);
-                    localStorage.removeItem('tj-onboarding-dismissed');
-                    setShowOnboarding(true);
-                  }}
-                  id="setup-connector-btn"
-                >
-                  Setup Guide
-                </button>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleStartSession}
+                    disabled={sessionStarting}
+                    id="start-session-btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontWeight: 700 }}
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    {sessionStarting ? (sessionMessage || 'Starting…') : 'Start Session & Connect MT5'}
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ fontSize: '0.76rem', opacity: 0.8 }}
+                    onClick={() => {
+                      setOnboardingDismissed(false);
+                      localStorage.removeItem('tj-onboarding-dismissed');
+                      setShowOnboarding(true);
+                    }}
+                    id="setup-connector-btn"
+                    title="Setup or download connector package"
+                  >
+                    {hasDownloadedBefore ? 'Connector Settings' : 'First Time Setup'}
+                  </button>
+                </div>
               </div>
             )}
 

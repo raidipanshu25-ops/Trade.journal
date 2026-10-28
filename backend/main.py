@@ -762,24 +762,53 @@ def health():
     }
 
 
+@app.post("/api/session/start")
 @app.post("/api/mt5/reconnect")
-def mt5_reconnect():
-    """Reconnect to the local MT5 desktop terminal and bring window to foreground."""
+async def start_session_or_reconnect(request: Request = None):
+    """Start trading session or reconnect MT5 terminal (works in both local and sync modes)."""
+    user_id = 0
+    try:
+        user = extract_user_from_token(request)
+        if user:
+            user_id = user.get("user_id", 0)
+    except Exception:
+        pass
+
     if MT5_MODE == "sync":
-        any_connected = any(ud.get("connected", False) for ud in _sync_data.values()) if _sync_data else False
-        return {"status": "sync_mode", "mt5_connected": any_connected,
-                "detail": "In sync mode — connection managed by local agent"}
-    if MT5_MODE != "local" or not _mt5_local:
-        raise HTTPException(400, "MT5 reconnect only available in local mode")
-    _mt5_local.disconnect()
-    ok = _mt5_local.connect()
-    # mt5.initialize() starts MT5 in the background — bring the window to foreground
-    if ok:
-        try:
-            _mt5_access._open_mt5()
-        except Exception:
-            pass
-    return {"status": "connected" if ok else "failed", "mt5_connected": ok}
+        user_sync = _get_user_sync_data(user_id) if user_id else (_sync_data[next(iter(_sync_data))] if _sync_data else None)
+        agent_ws = user_sync.get("ws") if user_sync else None
+        if agent_ws:
+            try:
+                await agent_ws.send_text(json.dumps({"action": "start_session"}))
+                return {
+                    "status": "session_starting",
+                    "connector_connected": True,
+                    "mt5_connected": True,
+                    "detail": "Session started — MT5 terminal opening on trader's PC."
+                }
+            except Exception as e:
+                logger.warning(f"Error signaling sync agent: {e}")
+
+        # If agent ws is not currently open but sync data exists
+        is_conn = user_sync.get("connector_connected", False) if user_sync else False
+        return {
+            "status": "agent_offline" if not is_conn else "session_signal_sent",
+            "connector_connected": is_conn,
+            "mt5_connected": False,
+            "detail": "Local MT5 connector is not running. Launch it using tjconnector://start or run_connector.bat."
+        }
+
+    if MT5_MODE == "local" and _mt5_local:
+        _mt5_local.disconnect()
+        ok = _mt5_local.connect()
+        if ok:
+            try:
+                _mt5_access._open_mt5()
+            except Exception:
+                pass
+        return {"status": "connected" if ok else "failed", "mt5_connected": ok, "connector_connected": True}
+
+    return {"status": "cloud_mode", "detail": "MT5 managed via cloud"}
 
 
 # ------------------------------------------------------------------ #
@@ -955,8 +984,14 @@ async def websocket_live(ws: WebSocket, token: str = None):
                     hist_flag = _history_updated_flag
                     if hist_flag:
                         _history_updated_flag = False
+                    is_mt5_conn = snap.get("connected", False)
+                    access_st = _mt5_access.get_status()
                     snapshot = {
-                        "connected": snap.get("connected", False),
+                        "connected": True,
+                        "connector_connected": True,
+                        "mt5_connected": is_mt5_conn,
+                        "mt5_status": "active" if is_mt5_conn else ("locked" if not access_st.get("mt5_is_open", True) else "closed"),
+                        "lock_reason": access_st.get("reason", "") if not is_mt5_conn else "",
                         "account": snap.get("account"),
                         "positions": snap.get("positions", []),
                         "history_updated": hist_flag,
@@ -1006,8 +1041,15 @@ async def websocket_live(ws: WebSocket, token: str = None):
                     hist_flag = user_sync.get("history_updated", False)
                     if hist_flag:
                         user_sync["history_updated"] = False
+                    is_agent_conn = user_sync.get("connector_connected", False)
+                    is_mt5_conn = user_sync.get("mt5_connected", False)
+                    access_st = _mt5_access.get_status()
                     snapshot = {
-                        "connected": user_sync["connected"],
+                        "connected": is_agent_conn,
+                        "connector_connected": is_agent_conn,
+                        "mt5_connected": is_mt5_conn,
+                        "mt5_status": user_sync.get("mt5_status", "closed"),
+                        "lock_reason": user_sync.get("lock_reason", "") or access_st.get("reason", ""),
                         "account": user_sync["account"],
                         "positions": user_sync["positions"],
                         "history_updated": hist_flag,
@@ -1989,6 +2031,25 @@ async def _mt5_access_loop():
     while True:
         try:
             await asyncio.to_thread(_mt5_access.tick)
+
+            # In sync mode: broadcast access state / close commands to active sync agents
+            if MT5_MODE == "sync" and _sync_data:
+                is_open = _mt5_access._state.get("mt5_is_open", True)
+                reason = _mt5_access._state.get("reason", "Rule violation or out of session")
+                if not is_open:
+                    for uid, udata in _sync_data.items():
+                        agent_ws = udata.get("ws")
+                        if agent_ws:
+                            try:
+                                await agent_ws.send_text(json.dumps({
+                                    "action": "close_mt5",
+                                    "reason": reason
+                                }))
+                                udata["mt5_connected"] = False
+                                udata["mt5_status"] = "out_of_session" if "Outside" in reason else "rule_violated"
+                                udata["lock_reason"] = reason
+                            except Exception:
+                                pass
         except Exception as e:
             logger.warning(f"MT5 Access Controller error: {e}")
         await asyncio.sleep(30)
@@ -2180,8 +2241,13 @@ def _get_user_sync_data(user_id: int) -> dict:
             "closed_trades": [],
             "last_sync": None,
             "last_live_update": None,
+            "connector_connected": False,
             "connected": False,
+            "mt5_connected": False,
+            "mt5_status": "disconnected",
+            "lock_reason": "",
             "history_updated": False,
+            "ws": None,
         }
     return _sync_data[user_id]
 
@@ -2226,85 +2292,87 @@ MT5_PATH=
         if sync_token:
             zf.writestr(".env", env_content)
         
-        # 3. run_connector.bat — one-click launcher (finds Python, installs deps, runs agent)
+        # 3. run_connector.bat — one-click launcher (finds Python, registers protocol, runs agent)
         bat_content = """@echo off
 title MT5 Trading Journal Connector
 echo ============================================================
-echo   MT5 Trading Journal -- Local Connector
+echo   MT5 Trading Journal -- Local Connector Launcher
 echo ============================================================
 echo.
-echo   Just keep this window open while you trade.
-echo   Your trades will sync automatically to your journal.
-echo.
-echo ============================================================
-echo.
+
+:: 1. Register custom URL protocol (tjconnector://) in HKCU (no admin required)
+reg add "HKCU\\Software\\Classes\\tjconnector" /ve /t REG_SZ /d "URL:Trade Journal Connector" /f >nul 2>&1
+reg add "HKCU\\Software\\Classes\\tjconnector" /v "URL Protocol" /t REG_SZ /d "" /f >nul 2>&1
+reg add "HKCU\\Software\\Classes\\tjconnector\\shell\\open\\command" /ve /t REG_SZ /d "\"%~f0\" \"%%1\"" /f >nul 2>&1
+
+:: 2. Create Desktop Shortcut for returning traders
+if exist "%USERPROFILE%\\Desktop" (
+    if not exist "%USERPROFILE%\\Desktop\\Start MT5 Connector.bat" (
+        (
+            echo @echo off
+            echo title MT5 Trading Journal Connector
+            echo call "%~f0"
+        ) > "%USERPROFILE%\\Desktop\\Start MT5 Connector.bat" 2>nul
+    )
+)
 
 set PY_CMD=
 
-:: Probe Python candidates in priority order
-for %%P in ("py -3.11" "py -3.12" "py -3.10" "py -3" "py" "python") do (
+:: Probe direct Python installs first, then other versions and py launcher
+for %%P in ("%LOCALAPPDATA%\\Programs\\Python\\Python312\\python.exe" "%LOCALAPPDATA%\\Programs\\Python\\Python311\\python.exe" "%ProgramFiles%\\Python312\\python.exe" "%ProgramFiles%\\Python311\\python.exe" "py -3.12" "py -3.11" "py -3.10" "py -3.13" "py -3.14" "py" "python") do (
     if not defined PY_CMD (
-        %%~P -c "import sys" >nul 2>&1
-        if not errorlevel 1 (
-            set PY_CMD=%%~P
+        if exist %%P (
+            %%P -c "import sys; sys.exit(0 if 10 <= sys.version_info[1] <= 14 else 1)" >nul 2>&1
+            if not errorlevel 1 (
+                set PY_CMD=%%P
+                goto :found_py
+            )
+        ) else (
+            %%~P -c "import sys; sys.exit(0 if 10 <= sys.version_info[1] <= 14 else 1)" >nul 2>&1
+            if not errorlevel 1 (
+                set PY_CMD=%%~P
+                goto :found_py
+            )
         )
     )
 )
 
-:: Check known AppData and ProgramFiles Python paths if not found
+:found_py
 if not defined PY_CMD (
-    for %%D in (
-        "%LOCALAPPDATA%\\Programs\\Python\\Python311\\python.exe"
-        "%LOCALAPPDATA%\\Programs\\Python\\Python312\\python.exe"
-        "%LOCALAPPDATA%\\Programs\\Python\\Python310\\python.exe"
-        "%LOCALAPPDATA%\\Programs\\Python\\Python313\\python.exe"
-        "%LOCALAPPDATA%\\Programs\\Python\\Python314\\python.exe"
-        "%ProgramFiles%\\Python311\\python.exe"
-        "%ProgramFiles%\\Python312\\python.exe"
-        "%ProgramFiles%\\Python310\\python.exe"
-        "C:\\Python311\\python.exe"
-        "C:\\Python312\\python.exe"
-    ) do (
-        if not defined PY_CMD if exist "%%~D" (
-            set PY_CMD="%%~D"
-        )
-    )
-)
-
-if not defined PY_CMD (
-    echo.
-    echo [ERROR] Python is not found on your system!
-    echo.
-    echo Please install Python 3.11 or higher from:
-    echo   https://www.python.org/downloads/
-    echo.
-    echo IMPORTANT: Check the box "Add Python to PATH" during installation.
-    echo.
+    echo [ERROR] Compatible Python (3.10 - 3.14) was not found in your PATH!
+    echo MetaTrader 5 requires Python 3.10 - 3.14. Python 3.15+ is not yet supported by MT5.
     pause
     exit /b 1
 )
 
-echo [1/2] Installing required packages...
+echo [1/2] Using Python: %PY_CMD%
+echo Installing / verifying required packages...
 %PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv psutil >nul 2>&1
 if %errorlevel% neq 0 (
+    echo [INFO] Package install output:
     %PY_CMD% -m pip install MetaTrader5 httpx websockets python-dotenv psutil
 )
 
 echo.
 echo [2/2] Starting MT5 Sync Agent...
 echo.
+
+:agent_loop
 if exist "local_sync_agent.py" (
     %PY_CMD% local_sync_agent.py
+) else if exist "backend\\local_sync_agent.py" (
+    %PY_CMD% backend\\local_sync_agent.py
 ) else (
     echo [ERROR] Cannot find local_sync_agent.py!
-    echo Make sure you extracted ALL files from the zip.
 )
 
-echo.
 if %errorlevel% neq 0 (
-    echo [ERROR] MT5 Sync Agent exited with an error.
+    echo.
+    echo [NOTICE] Connector process stopped. Auto-restarting in 5 seconds...
+    echo Press Ctrl+C if you want to exit.
+    timeout /t 5 >nul
+    goto :agent_loop
 )
-pause
 """
         zf.writestr("run_connector.bat", bat_content)
         
@@ -2428,11 +2496,22 @@ async def sync_push(request: Request, payload: dict = Body(...)):
 
     user_sync = _get_user_sync_data(user_id)
 
-    # Store account & positions
-    user_sync["account"] = payload.get("account")
-    user_sync["positions"] = payload.get("positions", [])
-    user_sync["connected"] = payload.get("account") is not None
+    # Store connector heartbeat & MT5 status
+    user_sync["connector_connected"] = True
+    user_sync["connected"] = True
     user_sync["last_sync"] = datetime.now(get_local_tz()).isoformat()
+
+    if payload.get("account") is not None:
+        user_sync["account"] = payload.get("account")
+        user_sync["positions"] = payload.get("positions", [])
+        user_sync["mt5_connected"] = payload.get("mt5_open", True)
+        user_sync["mt5_status"] = "active"
+        user_sync["lock_reason"] = ""
+    else:
+        # MT5 is closed due to rule violation, out of session, or user closed it
+        user_sync["mt5_connected"] = False
+        user_sync["mt5_status"] = payload.get("status", "locked")
+        user_sync["lock_reason"] = payload.get("lock_reason", "")
 
     # Process closed trades through existing upsert pipeline
     closed_trades = payload.get("closed_trades", [])
@@ -2496,6 +2575,9 @@ async def ws_sync_agent(ws: WebSocket, token: str = None, api_key: str = None):
     await ws.accept()
     logger.info(f"Sync agent WebSocket connected for user {user_id}")
     user_sync = _get_user_sync_data(user_id)
+    user_sync["connector_connected"] = True
+    user_sync["connected"] = True
+    user_sync["ws"] = ws
 
     try:
         while True:
@@ -2505,18 +2587,36 @@ async def ws_sync_agent(ws: WebSocket, token: str = None, api_key: str = None):
             except json.JSONDecodeError:
                 continue
 
-            if data.get("type") == "live_update":
+            msg_type = data.get("type")
+            user_sync["connector_connected"] = True
+            user_sync["connected"] = True
+            user_sync["last_live_update"] = data.get("timestamp", datetime.now(get_local_tz()).isoformat())
+
+            if msg_type == "live_update":
                 user_sync["account"] = data.get("account")
                 user_sync["positions"] = data.get("positions", [])
-                user_sync["connected"] = True
-                user_sync["last_live_update"] = data.get("timestamp", datetime.now(get_local_tz()).isoformat())
+                user_sync["mt5_connected"] = True
+                user_sync["mt5_status"] = "active"
+                user_sync["lock_reason"] = ""
+            elif msg_type == "heartbeat":
+                user_sync["mt5_connected"] = data.get("mt5_open", False)
+                user_sync["mt5_status"] = data.get("status", "mt5_closed")
+                user_sync["lock_reason"] = data.get("lock_reason", "")
+                if data.get("account") is not None:
+                    user_sync["account"] = data.get("account")
 
     except WebSocketDisconnect:
         logger.info(f"Sync agent WebSocket disconnected for user {user_id}")
+        user_sync["connector_connected"] = False
         user_sync["connected"] = False
+        user_sync["mt5_connected"] = False
+        user_sync["ws"] = None
     except Exception as e:
         logger.warning(f"Sync agent WebSocket error for user {user_id}: {e}")
+        user_sync["connector_connected"] = False
         user_sync["connected"] = False
+        user_sync["mt5_connected"] = False
+        user_sync["ws"] = None
 
 
 @app.get("/api/sync/status")
@@ -2526,7 +2626,11 @@ async def sync_status(user=Depends(extract_user_from_token)):
     user_sync = _get_user_sync_data(user_id)
     return {
         "mode": MT5_MODE,
-        "connected": user_sync["connected"],
+        "connector_connected": user_sync.get("connector_connected", False),
+        "connected": user_sync.get("connector_connected", False),
+        "mt5_connected": user_sync.get("mt5_connected", False),
+        "mt5_status": user_sync.get("mt5_status", "closed"),
+        "lock_reason": user_sync.get("lock_reason", ""),
         "last_sync": user_sync["last_sync"],
         "last_live_update": user_sync["last_live_update"],
         "positions_count": len(user_sync["positions"]),

@@ -144,8 +144,42 @@ export const api = {
   journalStats: () => apiFetch('/journal/stats'),
   syncJournal: () => apiFetch('/journal/sync', { method: 'POST' }),
 
-  // Reconnect
+  // Reconnect / Session Start
   reconnect: () => apiFetch('/mt5/reconnect', { method: 'POST' }),
+  startSession: () => apiFetch('/session/start', { method: 'POST' }),
+
+  // Local Connector Direct Integration (Port 18500 & Protocol)
+  pingLocalConnector: async () => {
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 1200);
+      const res = await fetch('http://127.0.0.1:18500/ping', {
+        signal: controller.signal,
+        mode: 'cors',
+      });
+      clearTimeout(id);
+      if (res.ok) return await res.json();
+    } catch (_) {}
+    return { ok: false, connector_running: false };
+  },
+  startLocalSession: async () => {
+    try {
+      const res = await fetch('http://127.0.0.1:18500/start-session', {
+        method: 'POST',
+        mode: 'cors',
+      });
+      if (res.ok) return await res.json();
+    } catch (_) {}
+    return { ok: false };
+  },
+  launchConnectorProtocol: () => {
+    try {
+      window.location.href = 'tjconnector://start';
+      return true;
+    } catch (_) {
+      return false;
+    }
+  },
 
   // Chart Vision
   chartUpload: (body) => apiFetch('/chart/upload', {
@@ -223,6 +257,7 @@ export const api = {
     a.click();
     document.body.removeChild(a);
     window.URL.revokeObjectURL(blobUrl);
+    localStorage.setItem('tj-connector-downloaded', 'true');
   },
 
   // Public config

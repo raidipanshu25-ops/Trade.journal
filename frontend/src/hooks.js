@@ -43,6 +43,10 @@ export function useLiveData() {
   const [positions, setPositions]   = useState([]);
   const [account, setAccount]       = useState(null);
   const [connected, setConnected]   = useState(false);
+  const [connectorConnected, setConnectorConnected] = useState(false);
+  const [mt5Connected, setMt5Connected]             = useState(false);
+  const [mt5Status, setMt5Status]                   = useState('closed');
+  const [lockReason, setLockReason]                 = useState('');
   const [wsStatus, setWsStatus]     = useState('connecting'); // connecting | open | closed | fallback
   const [historyUpdatedCounter, setHistoryUpdatedCounter] = useState(0);
 
@@ -134,6 +138,10 @@ export function useLiveData() {
           if (data.positions !== undefined) setPositions(data.positions || []);
           if (data.account   !== undefined) setAccount(data.account || null);
           if (data.connected !== undefined) setConnected(data.connected || false);
+          if (data.connector_connected !== undefined) setConnectorConnected(Boolean(data.connector_connected));
+          if (data.mt5_connected !== undefined) setMt5Connected(Boolean(data.mt5_connected));
+          if (data.mt5_status !== undefined) setMt5Status(data.mt5_status);
+          if (data.lock_reason !== undefined) setLockReason(data.lock_reason);
 
           // Full-tick fields (only present every 3rd tick)
           if (data.daily_stats  !== undefined) setDailyStats(data.daily_stats);
@@ -187,6 +195,7 @@ export function useLiveData() {
 
   return {
     positions, account, connected, wsStatus, historyUpdatedCounter,
+    connectorConnected, mt5Connected, mt5Status, lockReason,
     dailyStats, discipline, journalStats, analytics, mt5Access,
   };
 }

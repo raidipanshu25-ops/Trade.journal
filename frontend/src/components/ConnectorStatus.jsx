@@ -1,52 +1,142 @@
 import React from 'react';
 
-export function ConnectorStatus({ connected, lastSync, onSetupClick }) {
+export function ConnectorStatus({
+  connected = false,
+  connectorConnected = false,
+  mt5Connected = false,
+  mt5Status = 'closed',
+  lockReason = '',
+  lastSync,
+  onStartSession,
+  onSetupClick,
+  starting = false,
+}) {
+  // If either connectorConnected or connected is true, the sync agent is alive
+  const isAgentOnline = connectorConnected || connected;
+  const isMt5Active = mt5Connected;
+  const isLockedOrOutOfSession = isAgentOnline && !isMt5Active;
+
+  // Determine badge colors & label
+  let dotColor = 'var(--red)';
+  let bg = 'var(--red-dim)';
+  let border = 'var(--red-border)';
+  let label = 'Connector Offline';
+  let subBadge = null;
+
+  if (isMt5Active) {
+    dotColor = 'var(--green-bright)';
+    bg = 'var(--green-dim)';
+    border = 'var(--green-border)';
+    label = 'MT5 Live';
+  } else if (isAgentOnline) {
+    // Connector is connected, MT5 is closed (Discipline or Out of Session)
+    dotColor = 'var(--cyan)';
+    bg = 'rgba(0, 180, 216, 0.12)';
+    border = 'rgba(0, 180, 216, 0.35)';
+    label = 'Connector Online';
+
+    const isOutOfSession = mt5Status === 'out_of_session' || (lockReason && lockReason.toLowerCase().includes('outside'));
+    subBadge = (
+      <span
+        style={{
+          marginLeft: '4px',
+          padding: '1px 6px',
+          borderRadius: '4px',
+          background: 'rgba(255, 255, 255, 0.08)',
+          color: 'var(--amber)',
+          fontSize: '0.68rem',
+          fontWeight: 600,
+        }}
+        title={lockReason || (isOutOfSession ? 'Outside of active trading session' : 'Rule violation lock active')}
+      >
+        🔒 {isOutOfSession ? 'Out of Session' : 'MT5 Locked'}
+      </span>
+    );
+  }
+
+  const tooltipText = isMt5Active
+    ? `MT5 is connected and streaming live data. ${lastSync ? `Last sync: ${lastSync}` : ''}`
+    : isAgentOnline
+    ? `Connection established. MT5 closed: ${lockReason || 'Session closed/Discipline protected'}`
+    : 'Connector is not running on your computer.';
+
   return (
     <div
       style={{
-        display: 'flex',
+        display: 'inline-flex',
         alignItems: 'center',
         gap: '6px',
         padding: '4px 10px',
         borderRadius: '6px',
-        background: connected ? 'var(--green-dim)' : 'var(--red-dim)',
-        border: `1px solid ${connected ? 'var(--green-border)' : 'var(--red-border)'}`,
+        background: bg,
+        border: `1px solid ${border}`,
         fontSize: '0.75rem',
         fontFamily: 'var(--mono)',
-        color: connected ? 'var(--green)' : 'var(--red)',
+        color: 'var(--text-0)',
         whiteSpace: 'nowrap',
       }}
-      title={lastSync ? `Last sync: ${lastSync}` : 'No sync data'}
+      title={tooltipText}
     >
       <div
         style={{
-          width: '6px',
-          height: '6px',
+          width: '7px',
+          height: '7px',
           borderRadius: '50%',
-          background: connected ? 'var(--green)' : 'var(--red)',
-          boxShadow: connected ? 'var(--green-glow)' : 'var(--red-glow)',
-          animation: connected ? 'pulseGreen 2s infinite' : 'pulseRed 2s infinite',
+          background: dotColor,
+          boxShadow: `0 0 8px ${dotColor}`,
+          animation: isMt5Active ? 'pulseGreen 2s infinite' : 'none',
         }}
       />
-      <span style={{ fontWeight: 600, letterSpacing: '0.5px' }}>
-        {connected ? 'MT5 Connected' : 'MT5 Disconnected'}
+      <span style={{ fontWeight: 600, letterSpacing: '0.3px', color: dotColor }}>
+        {label}
       </span>
-      {!connected && (
+
+      {subBadge}
+
+      {/* When offline, provide 1-click connect button for returning users */}
+      {!isAgentOnline && onStartSession && (
+        <button
+          onClick={onStartSession}
+          disabled={starting}
+          style={{
+            marginLeft: '6px',
+            background: 'var(--primary)',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            padding: '2px 8px',
+            cursor: starting ? 'wait' : 'pointer',
+            fontSize: '0.70rem',
+            fontWeight: 700,
+            fontFamily: 'var(--mono)',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '3px',
+          }}
+          title="Click to start your trading session and connect MT5"
+        >
+          {starting ? 'Connecting…' : '⚡ Connect'}
+        </button>
+      )}
+
+      {/* When offline, provide secondary setup/download option */}
+      {!isAgentOnline && onSetupClick && (
         <button
           onClick={onSetupClick}
           style={{
-            marginLeft: '6px',
+            marginLeft: '4px',
             background: 'none',
             border: 'none',
-            color: 'var(--text-0)',
+            color: 'var(--text-2)',
             textDecoration: 'underline',
             cursor: 'pointer',
-            fontSize: '0.7rem',
+            fontSize: '0.68rem',
             padding: 0,
             fontFamily: 'var(--mono)',
           }}
+          title="Download connector package or view setup guide"
         >
-          Setup
+          First time?
         </button>
       )}
     </div>

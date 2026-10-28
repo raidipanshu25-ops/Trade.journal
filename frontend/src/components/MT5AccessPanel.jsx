@@ -177,19 +177,19 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
         <div style={{
           display: 'flex', alignItems: 'center', gap: '6px',
           padding: '5px 12px', borderRadius: '6px',
-          background: isOpen ? 'var(--green-dim)' : 'var(--red-dim)',
-          border: `1px solid ${isOpen ? 'var(--green-border)' : 'var(--red-border)'}`,
+          background: isOpen ? 'var(--green-dim)' : 'var(--amber-dim)',
+          border: `1px solid ${isOpen ? 'var(--green-border)' : 'var(--amber-border)'}`,
         }}>
           <div style={{
             width: '7px', height: '7px', borderRadius: '50%',
-            background: isOpen ? 'var(--green-bright)' : 'var(--red-bright)',
+            background: isOpen ? 'var(--green-bright)' : 'var(--amber)',
           }} />
           <span style={{
             fontSize: '0.75rem', fontWeight: 800, fontFamily: 'var(--mono)',
-            color: isOpen ? 'var(--green-bright)' : 'var(--red-bright)',
+            color: isOpen ? 'var(--green-bright)' : 'var(--amber)',
             textTransform: 'uppercase', letterSpacing: '0.8px',
           }}>
-            {isOpen ? 'Open' : 'Closed'}
+            {isOpen ? 'MT5 Open' : 'MT5 Closed'}
           </span>
         </div>
       </div>
@@ -201,7 +201,12 @@ export function MT5AccessPanel({ wsStatus: wsMt5Access }) {
         borderRadius: '6px', border: '1px solid rgba(255,255,255,0.1)',
         lineHeight: 1.5, fontWeight: 500,
       }}>
-        {status.reason || '—'}
+        <div>{status.reason || '—'}</div>
+        {!isOpen && (
+          <div style={{ fontSize: '0.74rem', color: 'var(--cyan)', marginTop: '4px', fontFamily: 'var(--mono)' }}>
+            🟢 Dashboard connection remains established. MT5 closed to enforce rules.
+          </div>
+        )}
       </div>
 
       {/* Session cards */}
