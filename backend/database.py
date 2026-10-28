@@ -145,23 +145,41 @@ def get_connection():
     Uses PostgreSQL when DATABASE_URL is set (cloud deployment),
     otherwise falls back to SQLite (local development).
     """
+    global _use_pg
     if _use_pg:
-        conn = psycopg2.connect(DATABASE_URL)
-        return _PgConnectionWrapper(conn)
-    else:
-        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        # Performance tuning — applied once per connection
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")   # safe + fast
-        conn.execute("PRAGMA cache_size=-8000")      # 8 MB page cache
-        conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA mmap_size=134217728")   # 128 MB mmap
-        return conn
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            return _PgConnectionWrapper(conn)
+        except Exception as e:
+            _log.error(f"❌ PostgreSQL connection failed: {e}. Falling back to SQLite.")
+            _use_pg = False
+
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    # Performance tuning — applied once per connection
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")   # safe + fast
+    conn.execute("PRAGMA cache_size=-8000")      # 8 MB page cache
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA mmap_size=134217728")   # 128 MB mmap
+    return conn
 
 
 def init_db():
     """Create tables if they don't exist."""
+    global _use_pg
+    if _use_pg:
+        try:
+            test_conn = psycopg2.connect(DATABASE_URL)
+            test_conn.close()
+        except Exception as e:
+            _log.critical(
+                f"❌ CRITICAL: Could not connect to PostgreSQL ({e}).\n"
+                f"Please verify your DATABASE_URL in your hosting environment variables.\n"
+                f"Falling back to local SQLite so the server can start up and stay online."
+            )
+            _use_pg = False
+
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -473,6 +491,19 @@ def _migrate_multi_user():
                 conn.rollback()
 
     _safe_add_column(conn, cursor, "users", "sync_token", "TEXT DEFAULT ''")
+    try:
+        import secrets
+        cursor.execute("SELECT id, sync_token FROM users")
+        for u in cursor.fetchall():
+            uid = u["id"] if isinstance(u, dict) or hasattr(u, "keys") else u[0]
+            stk = u["sync_token"] if isinstance(u, dict) or hasattr(u, "keys") else u[1]
+            if not stk:
+                new_stk = secrets.token_urlsafe(32)
+                cursor.execute("UPDATE users SET sync_token = ? WHERE id = ?", (new_stk, uid))
+        conn.commit()
+    except Exception:
+        if _use_pg:
+            conn.rollback()
 
     for table in tables:
         try:
@@ -1898,18 +1929,20 @@ def get_user_by_email(email: str):
     return dict(row) if row else None
 
 def create_user(username: str, email: str, password_hash: str, role: str = 'user'):
+    import secrets
+    initial_sync_token = secrets.token_urlsafe(32)
     conn = get_connection()
     cursor = conn.cursor()
     try:
         insert_sql = (
-            "INSERT INTO users (username, email, password_hash, role, created_at) "
-            "VALUES (?, ?, ?, ?, ?)"
+            "INSERT INTO users (username, email, password_hash, role, created_at, sync_token) "
+            "VALUES (?, ?, ?, ?, ?, ?)"
         )
         if _use_pg:
             insert_sql += " RETURNING id"
         cursor.execute(
             insert_sql,
-            (username, email, password_hash, role, datetime.now(get_local_tz()).isoformat())
+            (username, email, password_hash, role, datetime.now(get_local_tz()).isoformat(), initial_sync_token)
         )
         conn.commit()
         if _use_pg:
@@ -2119,6 +2152,8 @@ def generate_sync_token(user_id: int) -> str:
 
 def get_user_by_sync_token(token: str):
     """Look up a user by their sync token."""
+    if not token or not str(token).strip():
+        return None
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE sync_token = ? AND status = 'active'", (token,))
