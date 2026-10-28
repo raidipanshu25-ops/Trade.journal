@@ -81,6 +81,36 @@ def print_warning(msg):
     print_status(msg, Colors.WARNING)
 
 # ── Configuration ────────────────────────────────────────────────────
+def load_all_env_sources():
+    """Load .env from any likely location without overriding existing environment variables."""
+    possible_envs = [
+        Path(__file__).resolve().parent / ".env",
+        Path(__file__).resolve().parent.parent / ".env",
+        Path.cwd() / "backend" / ".env",
+        Path.cwd() / ".env",
+        CONFIG_DIR / ".env",
+    ]
+    for p in possible_envs:
+        try:
+            if p.exists():
+                load_dotenv(dotenv_path=p, override=False)
+        except Exception:
+            pass
+
+def detect_local_backend() -> str:
+    """Check if local backend server is running on port 8000."""
+    import urllib.request
+    for host in ["127.0.0.1", "localhost"]:
+        test_url = f"http://{host}:8000"
+        try:
+            req = urllib.request.Request(f"{test_url}/api/health", headers={"User-Agent": "TJ-Connector"})
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
+                if resp.status == 200:
+                    return test_url
+        except Exception:
+            pass
+    return ""
+
 def load_config() -> dict:
     """Load saved config or return empty dict."""
     if CONFIG_FILE.exists():
@@ -92,28 +122,43 @@ def load_config() -> dict:
 
 def save_config(cfg: dict):
     """Save config to disk."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.debug(f"Could not save config to {CONFIG_FILE}: {e}")
 
-def run_setup_wizard() -> dict:
-    """Interactive first-run setup."""
+def run_setup_wizard(suggested_backend: str = "https://trade-journal-ukc2.onrender.com") -> dict:
+    """First-run setup wizard. Safe against EOF and never abruptly exits."""
     print(f"\n{Colors.HEADER}{'='*60}")
     print("  MT5 Trading Journal — Connector Setup")
     print(f"{'='*60}{Colors.ENDC}\n")
 
-    default_url = "https://trade-journal-ukc2.onrender.com"
-    url = input(f"  Backend URL [{default_url}]: ").strip()
-    if not url:
-        url = default_url
+    url = suggested_backend
+    try:
+        entered_url = input(f"  Backend URL [{suggested_backend}]: ").strip()
+        if entered_url:
+            url = entered_url
+    except Exception:
+        url = suggested_backend
 
     print(f"\n  {Colors.OKCYAN}Your sync token is in your Trading Journal dashboard:")
-    print(f"  Settings → MT5 Connector → Copy Sync Token{Colors.ENDC}\n")
-    sync_token = input("  Sync Token: ").strip()
-    if not sync_token:
-        print_error("Sync token is required. Get it from your dashboard Settings page.")
-        sys.exit(1)
+    print("  Settings -> MT5 Connector -> Copy Sync Token")
+    print(f"  (For local development, press Enter to use 'local'){Colors.ENDC}\n")
+    try:
+        sync_token = input("  Sync Token [local]: ").strip()
+    except Exception:
+        sync_token = "local"
 
-    mt5_path = input("  MT5 Path (press Enter for auto-detect): ").strip() or None
+    if not sync_token:
+        sync_token = "local"
+        print_status("No token entered -- defaulting to 'local'. You can change this anytime in settings.")
+
+    mt5_path = None
+    try:
+        mt5_path = input("  MT5 Path (press Enter for auto-detect): ").strip() or None
+    except Exception:
+        mt5_path = None
 
     cfg = {
         "backend_url": url.rstrip("/"),
@@ -121,7 +166,7 @@ def run_setup_wizard() -> dict:
         "mt5_path": mt5_path,
     }
     save_config(cfg)
-    print_success(f"\nConfig saved to {CONFIG_FILE}")
+    print_success(f"\nConfig saved to {CONFIG_FILE}\n")
     return cfg
 
 # ── Windows Protocol & Desktop Shortcut Registration ─────────────────
@@ -855,26 +900,42 @@ async def main():
     print("  MT5 Trading Journal — Local Connector (v2.0)")
     print(f"{'='*60}{Colors.ENDC}\n")
 
-    load_dotenv()
+    # Load from any available .env files
+    load_all_env_sources()
 
-    backend_url = os.environ.get("RENDER_BACKEND_URL", "")
-    sync_token = os.environ.get("SYNC_TOKEN", "") or os.environ.get("SYNC_API_KEY", "")
-    mt5_path = os.environ.get("MT5_PATH")
+    backend_url = (os.environ.get("RENDER_BACKEND_URL") or os.environ.get("BACKEND_URL") or "").strip()
+    sync_token = (os.environ.get("SYNC_TOKEN") or os.environ.get("SYNC_API_KEY") or "").strip()
+    mt5_path = (os.environ.get("MT5_PATH") or "").strip() or None
 
-    if not backend_url or not sync_token:
-        cfg = load_config()
-        backend_url = backend_url or cfg.get("backend_url", "")
-        sync_token = sync_token or cfg.get("sync_token", "")
-        mt5_path = mt5_path or cfg.get("mt5_path")
+    cfg = load_config()
+    backend_url = backend_url or cfg.get("backend_url", "").strip()
+    sync_token = sync_token or cfg.get("sync_token", "").strip()
+    mt5_path = mt5_path or cfg.get("mt5_path")
 
-    if not backend_url or not sync_token:
-        cfg = run_setup_wizard()
-        backend_url = cfg["backend_url"]
-        sync_token = cfg["sync_token"]
-        mt5_path = cfg.get("mt5_path")
+    # Auto-detect local backend if not specified
+    if not backend_url:
+        local_url = detect_local_backend()
+        if local_url:
+            backend_url = local_url
+            print_status(f"Auto-detected active local backend: {backend_url}")
+        else:
+            backend_url = "https://trade-journal-ukc2.onrender.com"
 
+    # Default sync token for local dev or query wizard
+    if not sync_token:
+        if "127.0.0.1" in backend_url or "localhost" in backend_url:
+            sync_token = "local"
+        elif sys.stdin and sys.stdin.isatty():
+            cfg = run_setup_wizard(backend_url)
+            backend_url = cfg["backend_url"]
+            sync_token = cfg["sync_token"]
+            mt5_path = cfg.get("mt5_path")
+        else:
+            sync_token = "local"
+
+    token_display = sync_token if len(sync_token) <= 10 else f"{sync_token[:8]}...{sync_token[-4:]}"
     print_status(f"Backend Target: {backend_url}")
-    print_status(f"Sync Token:     {sync_token[:8]}...{sync_token[-4:]}")
+    print_status(f"Sync Token:     {token_display}")
 
     # Register protocol handler so browser can 1-click launch
     register_protocol_handler()
@@ -885,8 +946,14 @@ async def main():
     # Resilient authentication loop — never dies even if backend is asleep
     await wait_for_backend_auth(backend_url, sync_token)
 
-    # Initial non-blocking check of MT5
-    if is_mt5_running():
+    # Check if launched via protocol command (e.g. tjconnector://start-session)
+    args_str = " ".join(sys.argv).lower()
+    auto_connect = "start-session" in args_str or "connect" in args_str
+
+    if auto_connect:
+        print_status("⚡ Dashboard protocol trigger received: starting session immediately...")
+        asyncio.create_task(asyncio.to_thread(connect_mt5, mt5_path, 3))
+    elif is_mt5_running():
         print_status("Detected active MetaTrader 5 process. Connecting...")
         asyncio.create_task(asyncio.to_thread(connect_mt5, mt5_path, 1))
     else:
@@ -909,3 +976,12 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print_warning("\nInterrupted by user (Ctrl+C). Exiting...")
+    except Exception as e:
+        print_error(f"\n[FATAL ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        print("\nConnector encountered an error. Press Enter to exit or close this window.")
+        try:
+            input()
+        except Exception:
+            time.sleep(15)
