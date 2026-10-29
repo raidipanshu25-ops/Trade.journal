@@ -28,20 +28,38 @@ try:
     import httpx
     import websockets
     from dotenv import load_dotenv
+    import psutil
     import MetaTrader5 as mt5
 except ImportError as e:
+    missing_name = getattr(e, "name", str(e))
     print("\n" + "=" * 60)
-    print(" [ERROR] Missing required Python package!")
-    print(f" Details: {e}")
-    print("\n Please install the required packages by running:")
-    print("   pip install MetaTrader5 httpx websockets python-dotenv psutil")
-    print(" Or double-click 'run_connector.bat'")
+    print(f" [INFO] Missing required Python package: {missing_name}")
+    print(" [INFO] Attempting automatic installation of dependencies...")
     print("=" * 60 + "\n")
     try:
-        input("Press Enter to exit...")
-    except Exception:
-        pass
-    sys.exit(1)
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "MetaTrader5", "httpx", "websockets", "python-dotenv", "psutil"
+        ])
+        import httpx
+        import websockets
+        from dotenv import load_dotenv
+        import psutil
+        import MetaTrader5 as mt5
+        print("\n[OK] Dependencies installed successfully!\n")
+    except Exception as install_err:
+        print("\n" + "=" * 60)
+        print(" [ERROR] Failed to automatically install dependencies.")
+        print(f" Details: {install_err}")
+        print("\n Please install manually by running:")
+        print(f"   {sys.executable} -m pip install MetaTrader5 httpx websockets python-dotenv psutil")
+        print(" Or double-click 'run_connector.bat'")
+        print("=" * 60 + "\n")
+        try:
+            input("Press Enter to exit...")
+        except Exception:
+            pass
+        sys.exit(1)
 
 # ── Config location ──────────────────────────────────────────────────
 CONFIG_DIR = Path.home() / ".tj-connector"

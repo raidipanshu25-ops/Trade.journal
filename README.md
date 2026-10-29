@@ -172,11 +172,14 @@ Taking one trade per session feels normal. The urge to overtrade is gone. You've
 
 You can run Trade.journal completely locally on your machine, or deploy the web dashboard to the cloud and just run the MT5 connector locally. 
 
-### Prerequisites
-Before you start, make sure you have installed:
-1. **Python 3.11 or higher** (Ensure "Add Python to PATH" is checked during installation)
-2. **Node.js v18 or higher** (Includes npm)
-3. **MetaTrader 5** (For Windows)
+### Prerequisites & Automatic Dependency Installer
+Trade.journal automatically detects and installs missing dependencies for you!
+If you are setting up on a new PC:
+- **Automatic Setup**: Simply double-click **`install_dependencies.bat`** (or run `run_connector.bat --install`). It checks for Python (3.10-3.14), pip, required packages (`MetaTrader5`, `httpx`, `websockets`, `python-dotenv`, `psutil`), Node.js, and npm, and automatically installs anything missing.
+- **Manual requirements** (if you prefer manual installation):
+  1. **Python 3.11 or 3.12** (with "Add Python to PATH" enabled)
+  2. **Node.js v18+** (with npm)
+  3. **MetaTrader 5** (Windows Desktop)
 
 ---
 
