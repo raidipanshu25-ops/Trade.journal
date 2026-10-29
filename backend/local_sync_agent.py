@@ -342,24 +342,37 @@ def auto_detect_mt5_path() -> str:
         return str(default_p)
     return ""
 
+_mt5_running_cache = False
+_mt5_running_cache_at = 0.0
+
 def is_mt5_running() -> bool:
-    """Fast check whether terminal64.exe is running."""
+    """Fast check whether terminal64.exe is running (cached for 2.5s)."""
+    global _mt5_running_cache, _mt5_running_cache_at
+    now = time.monotonic()
+    if now - _mt5_running_cache_at < 2.5:
+        return _mt5_running_cache
+
+    running = False
     try:
         import psutil
         for proc in psutil.process_iter(["name"]):
             pname = proc.info.get("name", "") or ""
             if "terminal64" in pname.lower():
-                return True
+                running = True
+                break
     except Exception:
         try:
             res = subprocess.run(
                 ["tasklist", "/FI", "IMAGENAME eq terminal64.exe"],
                 capture_output=True, text=True, timeout=3,
             )
-            return "terminal64.exe" in res.stdout.lower()
+            running = "terminal64.exe" in res.stdout.lower()
         except Exception:
             pass
-    return False
+
+    _mt5_running_cache = running
+    _mt5_running_cache_at = now
+    return running
 
 def ensure_mt5_gui_running(mt5_path: str = "") -> bool:
     """Ensure the MT5 terminal GUI is open and visible on desktop."""
@@ -535,7 +548,6 @@ def get_closed_trades():
 
         if _first_sync:
             print_status(f"First sync: pulling {lookback_days} days of history ({len(deals)} deals found).")
-            _first_sync = False
 
         deals_by_pid = {}
         for d in deals:
@@ -743,6 +755,7 @@ async def bulk_sync_loop(backend_url: str, sync_token: str, mt5_path: str = ""):
                     synced = result.get("synced_trades", 0)
                     pos_count = result.get("positions_received", 0)
                     print_success(f"Bulk sync: {pos_count} positions, {synced} trades synced.")
+                    _first_sync = False
                 else:
                     # Push connector heartbeat even when MT5 is closed
                     await client.post(

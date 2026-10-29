@@ -258,9 +258,35 @@ export function MT5AccountsPage() {
   };
 
   const handleReconnect = async () => {
-    try { const res = await api.reconnect(); setGlobalMsg(res.mt5_connected ? '✅ MT5 reconnected!' : '⚠️ MT5 reconnect failed.'); loadHealth(); }
-    catch (err) { setGlobalMsg('Reconnect failed: ' + err.message); }
-    setTimeout(() => setGlobalMsg(''), 4000);
+    try {
+      setGlobalMsg('Connecting to MetaTrader 5...');
+      const res = await api.reconnect();
+      if (res.mt5_connected) {
+        setGlobalMsg('✅ MT5 reconnected successfully!');
+        loadHealth();
+      } else {
+        // Poll for up to 10 seconds in case MT5 terminal process is initializing
+        let connected = false;
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            const h = await api.health();
+            if (h && h.mt5_connected) {
+              setHealth(h);
+              connected = true;
+              setGlobalMsg('✅ MT5 detected and connected successfully!');
+              break;
+            }
+          } catch (_) {}
+        }
+        if (!connected) {
+          setGlobalMsg(res.detail || '⚠️ MT5 connection failed. Please ensure MetaTrader 5 is open on your PC.');
+        }
+      }
+    } catch (err) {
+      setGlobalMsg('Reconnect failed: ' + err.message);
+    }
+    setTimeout(() => setGlobalMsg(''), 6000);
   };
 
   return (

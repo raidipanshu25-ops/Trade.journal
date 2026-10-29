@@ -158,26 +158,28 @@ function App() {
 
   const handleStartSession = useCallback(async () => {
     setSessionStarting(true);
-    setSessionMessage('Establishing connection...');
+    setSessionMessage('Connecting to MT5...');
     try {
-      // 1. Check local connector HTTP listener (port 18500)
+      // 1. First try backend direct session start (instant if in local mode or already connected)
+      try {
+        const res = await api.startSession();
+        if (res && (res.status === 'connected' || res.mt5_connected)) {
+          setSessionMessage('✅ MT5 Connected successfully!');
+          setTimeout(() => {
+            setSessionStarting(false);
+            setSessionMessage('');
+            dash.refresh();
+          }, 1500);
+          return;
+        }
+      } catch (_) {}
+
+      // 2. Check local connector HTTP listener (port 18500)
       const localPing = await api.pingLocalConnector();
       if (localPing && localPing.ok) {
+        setSessionMessage('Local agent active! Launching MT5...');
         await api.startLocalSession();
         await api.startSession();
-        setSessionMessage('Local agent active! Launching MT5...');
-        setTimeout(() => {
-          setSessionStarting(false);
-          setSessionMessage('');
-          dash.refresh();
-        }, 2000);
-        return;
-      }
-
-      // 2. Try backend session start endpoint
-      const res = await api.startSession();
-      if (res && res.connector_connected) {
-        setSessionMessage('Session signal sent. MT5 starting...');
         setTimeout(() => {
           setSessionStarting(false);
           setSessionMessage('');
@@ -187,13 +189,37 @@ function App() {
       }
 
       // 3. Launch via registered Windows protocol handler (tjconnector://start)
+      setSessionMessage('Launching MT5 Connector on your PC...');
       api.launchConnectorProtocol();
-      setSessionMessage('Opening MT5 Connector on your PC...');
-      setTimeout(() => {
-        setSessionStarting(false);
-        setSessionMessage('');
-        dash.refresh();
-      }, 3500);
+
+      // Poll port 18500 for up to 6 seconds to detect the newly started connector
+      let detected = false;
+      for (let attempt = 1; attempt <= 6; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const ping = await api.pingLocalConnector();
+        if (ping && ping.ok) {
+          detected = true;
+          setSessionMessage('Connector detected! Connecting MT5...');
+          await api.startLocalSession();
+          await api.startSession();
+          break;
+        }
+      }
+
+      if (detected) {
+        setTimeout(() => {
+          setSessionStarting(false);
+          setSessionMessage('');
+          dash.refresh();
+        }, 2000);
+      } else {
+        setSessionMessage('Opening connector. Run "run_connector.bat" if not started.');
+        setTimeout(() => {
+          setSessionStarting(false);
+          setSessionMessage('');
+          dash.refresh();
+        }, 4000);
+      }
     } catch (err) {
       console.error('Session start error:', err);
       api.launchConnectorProtocol();

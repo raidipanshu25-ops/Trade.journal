@@ -9,6 +9,7 @@ Docs: https://metaapi.cloud/docs/client/httpClient/
 """
 import logging
 import asyncio
+import os
 import httpx
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -16,6 +17,9 @@ from typing import Optional
 from config import METAAPI_TOKEN, METAAPI_DOMAIN, get_local_tz
 
 logger = logging.getLogger(__name__)
+
+# SSL verification toggle (defaults to secure True, can be disabled via METAAPI_SSL_VERIFY=false if needed)
+_SSL_VERIFY = os.getenv("METAAPI_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
 
 # MetaAPI REST base URLs
 _PROVISIONING_BASE = f"https://mt-provisioning-api-v1.{METAAPI_DOMAIN}"
@@ -54,7 +58,7 @@ async def provision_account(login: str, password: str, server: str,
         "tags":        ["trading-journal"],
     }
 
-    async with httpx.AsyncClient(verify=False, timeout=60) as client:
+    async with httpx.AsyncClient(verify=_SSL_VERIFY, timeout=60) as client:
         resp = await client.post(
             f"{_PROVISIONING_BASE}/users/current/accounts",
             headers=HEADERS,
@@ -71,7 +75,7 @@ async def delete_metaapi_account(metaapi_account_id: str) -> bool:
     """Remove an MT5 account from MetaAPI cloud."""
     if not METAAPI_TOKEN or not metaapi_account_id:
         return False
-    async with httpx.AsyncClient(verify=False, timeout=30) as client:
+    async with httpx.AsyncClient(verify=_SSL_VERIFY, timeout=30) as client:
         resp = await client.delete(
             f"{_PROVISIONING_BASE}/users/current/accounts/{metaapi_account_id}",
             headers=HEADERS,
@@ -81,7 +85,7 @@ async def delete_metaapi_account(metaapi_account_id: str) -> bool:
 
 async def get_account_state(metaapi_account_id: str) -> dict:
     """Fetch current account deployment state from MetaAPI."""
-    async with httpx.AsyncClient(verify=False, timeout=15) as client:
+    async with httpx.AsyncClient(verify=_SSL_VERIFY, timeout=15) as client:
         resp = await client.get(
             f"{_PROVISIONING_BASE}/users/current/accounts/{metaapi_account_id}",
             headers=HEADERS,
@@ -113,7 +117,7 @@ async def deploy_account(metaapi_account_id: str) -> bool:
     """
     if not METAAPI_TOKEN or not metaapi_account_id:
         return False
-    async with httpx.AsyncClient(verify=False, timeout=30) as client:
+    async with httpx.AsyncClient(verify=_SSL_VERIFY, timeout=30) as client:
         resp = await client.post(
             f"{_PROVISIONING_BASE}/users/current/accounts/{metaapi_account_id}/deploy",
             headers=HEADERS,
@@ -134,7 +138,7 @@ async def deploy_account(metaapi_account_id: str) -> bool:
 
 async def get_account_info(metaapi_account_id: str) -> Optional[dict]:
     """Fetch account balance / equity from MetaAPI."""
-    async with httpx.AsyncClient(verify=False, timeout=15) as client:
+    async with httpx.AsyncClient(verify=_SSL_VERIFY, timeout=15) as client:
         resp = await client.get(
             f"{_CLIENT_API_BASE}/users/current/accounts/{metaapi_account_id}/account-information",
             headers=HEADERS,
@@ -159,7 +163,7 @@ async def get_account_info(metaapi_account_id: str) -> Optional[dict]:
 
 async def get_open_positions(metaapi_account_id: str) -> list[dict]:
     """Fetch currently open positions."""
-    async with httpx.AsyncClient(verify=False, timeout=15) as client:
+    async with httpx.AsyncClient(verify=_SSL_VERIFY, timeout=15) as client:
         resp = await client.get(
             f"{_CLIENT_API_BASE}/users/current/accounts/{metaapi_account_id}/positions",
             headers=HEADERS,
@@ -235,7 +239,7 @@ async def get_deals(metaapi_account_id: str,
     from_iso = from_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     to_iso   = to_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-    async with httpx.AsyncClient(verify=False, timeout=30) as client:
+    async with httpx.AsyncClient(verify=_SSL_VERIFY, timeout=30) as client:
         resp = await client.get(
             f"{_CLIENT_API_BASE}/users/current/accounts/{metaapi_account_id}/history-deals/time/{from_iso}/{to_iso}",
             headers=HEADERS,
@@ -286,7 +290,7 @@ async def get_history_orders(metaapi_account_id: str,
     """Fetch closed orders (used for open_time of cross-day positions)."""
     from_iso = from_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     to_iso   = to_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    async with httpx.AsyncClient(verify=False, timeout=30) as client:
+    async with httpx.AsyncClient(verify=_SSL_VERIFY, timeout=30) as client:
         resp = await client.get(
             f"{_CLIENT_API_BASE}/users/current/accounts/{metaapi_account_id}/history-orders/time/{from_iso}/{to_iso}",
             headers=HEADERS,

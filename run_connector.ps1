@@ -54,7 +54,7 @@ if (-not $pythonCmd) {
 }
 
 Write-Host "[1/2] Installing / verifying dependencies with $pythonCmd..." -ForegroundColor Green
-$installArgs = "-m pip install MetaTrader5 httpx websockets python-dotenv"
+$installArgs = "-m pip install MetaTrader5 httpx websockets python-dotenv psutil"
 Invoke-Expression "$pythonCmd $installArgs"
 
 Write-Host ""

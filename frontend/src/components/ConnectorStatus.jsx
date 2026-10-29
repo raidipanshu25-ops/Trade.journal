@@ -23,7 +23,12 @@ export function ConnectorStatus({
   let label = 'Connector Offline';
   let subBadge = null;
 
-  if (isMt5Active) {
+  if (starting || mt5Status === 'reconnecting') {
+    dotColor = 'var(--amber)';
+    bg = 'var(--amber-dim)';
+    border = 'var(--amber-border)';
+    label = starting ? 'Connecting MT5…' : 'Reconnecting MT5…';
+  } else if (isMt5Active) {
     dotColor = 'var(--green-bright)';
     bg = 'var(--green-dim)';
     border = 'var(--green-border)';
@@ -54,11 +59,13 @@ export function ConnectorStatus({
     );
   }
 
-  const tooltipText = isMt5Active
+  const tooltipText = starting
+    ? 'Establishing connection to MetaTrader 5...'
+    : isMt5Active
     ? `MT5 is connected and streaming live data. ${lastSync ? `Last sync: ${lastSync}` : ''}`
     : isAgentOnline
     ? `Connection established. MT5 closed: ${lockReason || 'Session closed/Discipline protected'}`
-    : 'Connector is not running on your computer.';
+    : 'Connector is not running on your computer. Click Connect to start.';
 
   return (
     <div

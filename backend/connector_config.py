@@ -28,6 +28,7 @@ def load_config() -> dict:
     return {
         "backend_url": "",
         "sync_token": "",
+        "mt5_path": "",
     }
 
 
@@ -62,12 +63,26 @@ def set_sync_token(token: str):
     save_config(config)
 
 
-def setup_wizard_config(backend_url: str, sync_token: str):
-    """Save both backend URL and sync token at once (used by CLI wizard)."""
+def get_mt5_path() -> str:
+    """Return the saved MT5 executable path."""
+    return load_config().get("mt5_path", "")
+
+
+def set_mt5_path(path: str):
+    """Update the MT5 executable path in config."""
+    config = load_config()
+    config["mt5_path"] = path
+    save_config(config)
+
+
+def setup_wizard_config(backend_url: str, sync_token: str, mt5_path: str = ""):
+    """Save backend URL, sync token, and optional mt5 path (used by CLI wizard)."""
     _ensure_dir()
     config = load_config()
     config["backend_url"] = backend_url.rstrip("/")
     config["sync_token"] = sync_token
+    if mt5_path:
+        config["mt5_path"] = mt5_path
     save_config(config)
     return config
 

@@ -161,6 +161,11 @@ class MT5Service:
         self._mt5_path = mt5_path or auto_detect_mt5_path()
         self._last_conn_check = 0.0
         self._last_conn_result = False
+        self._reconnect_enabled = True
+        self._reconnect_attempts = 0
+        self._last_reconnect_attempt = 0.0
+        self._backoff_delay = 5.0
+        self._is_reconnecting = False
 
     # ------------------------------------------------------------------ #
     #  Connection management
@@ -170,7 +175,7 @@ class MT5Service:
 
         Always calls mt5.shutdown() first to release any stale IPC lock
         from a previous Python process that may have been killed uncleanly.
-        Runs mt5.initialize() in a thread with a timeout to prevent blocking
+        Runs mt5.initialize() in a daemon thread with a timeout to prevent blocking
         the server startup if the terminal is unresponsive.
         """
         try:
@@ -190,17 +195,31 @@ class MT5Service:
             if self._mt5_path:
                 kwargs["path"] = self._mt5_path
 
-            # Run initialize in a thread with a timeout — mt5.initialize()
-            # can hang indefinitely if the terminal's IPC pipe is locked
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(mt5.initialize, **kwargs)
+            # Run initialize in a daemon thread with timeout — prevents ThreadPoolExecutor
+            # deadlock on shutdown(wait=True) if C-level IPC is frozen
+            import threading
+            result_holder = [None]
+            error_holder = [None]
+
+            def _init_mt5():
                 try:
-                    result = future.result(timeout=30)  # 30s timeout
-                except concurrent.futures.TimeoutError:
-                    logger.error("MT5 init timed out after 30s — terminal may be unresponsive")
-                    self._connected = False
-                    return False
+                    result_holder[0] = mt5.initialize(**kwargs)
+                except Exception as ex:
+                    error_holder[0] = ex
+
+            init_thread = threading.Thread(target=_init_mt5, daemon=True)
+            init_thread.start()
+            init_thread.join(timeout=30.0)
+
+            if init_thread.is_alive():
+                logger.error("MT5 init timed out after 30s — terminal may be unresponsive")
+                self._connected = False
+                return False
+
+            if error_holder[0] is not None:
+                raise error_holder[0]
+
+            result = result_holder[0]
 
             if not result:
                 err = mt5.last_error()
@@ -208,11 +227,46 @@ class MT5Service:
                 self._connected = False
                 return False
             self._connected = True
+            self._reconnect_attempts = 0
+            self._backoff_delay = 5.0
             logger.info("MT5 connected successfully")
             return True
         except Exception as e:
             logger.error(f"MT5 connection error: {e}")
             self._connected = False
+            return False
+
+    def auto_reconnect(self) -> bool:
+        """Attempt auto-reconnection if MT5 is disconnected with exponential backoff."""
+        if not self._reconnect_enabled or self._is_reconnecting:
+            return False
+        if self.is_connected:
+            return True
+
+        now = time.time()
+        if now - self._last_reconnect_attempt < self._backoff_delay:
+            return False
+
+        self._is_reconnecting = True
+        self._last_reconnect_attempt = now
+        self._reconnect_attempts += 1
+        logger.info(f"🔄 MT5 auto-reconnect attempt #{self._reconnect_attempts} (backoff: {self._backoff_delay:.1f}s)...")
+        try:
+            ok = self.connect()
+            if ok:
+                logger.info(f"✅ MT5 auto-reconnect SUCCEEDED on attempt #{self._reconnect_attempts}")
+                self._reconnect_attempts = 0
+                self._backoff_delay = 5.0
+                self._is_reconnecting = False
+                return True
+            else:
+                self._backoff_delay = min(self._backoff_delay * 1.5, 30.0)
+                self._is_reconnecting = False
+                return False
+        except Exception as e:
+            logger.warning(f"⚠️ MT5 auto-reconnect failed with error: {e}")
+            self._backoff_delay = min(self._backoff_delay * 1.5, 30.0)
+            self._is_reconnecting = False
             return False
 
     def disconnect(self):
@@ -225,7 +279,7 @@ class MT5Service:
 
     @property
     def is_connected(self) -> bool:
-        """Check if MT5 terminal is available (cached for 1s)."""
+        """Check if MT5 terminal is available (cached for 5s)."""
         if not self._connected:
             return False
         now = time.time()
@@ -373,27 +427,51 @@ class MT5Service:
         if order_type is None:
             return {"status": "error", "message": "Unsupported order type"}
             
-        price = price_dict[position.type]
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": position.symbol,
-            "volume": float(close_volume),
-            "type": order_type,
-            "position": position.ticket,
-            "price": float(price),
-            "deviation": 20,
-            "magic": 0,
-            "comment": "Journal AutoClose",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        
-        result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            return {"status": "error", "message": f"Order send failed: {result.comment} ({result.retcode})"}
-        
-        return {"status": "success", "result": result._asdict()}
+        # Determine supported filling mode based on symbol properties
+        sym_info = mt5.symbol_info(position.symbol)
+        filling_candidates = []
+        if sym_info:
+            fill_flags = getattr(sym_info, "filling_mode", 0)
+            # 2 = SYMBOL_FILLING_IOC, 1 = SYMBOL_FILLING_FOK
+            if fill_flags & 2:
+                filling_candidates.append(mt5.ORDER_FILLING_IOC)
+            if fill_flags & 1:
+                filling_candidates.append(mt5.ORDER_FILLING_FOK)
+            filling_candidates.append(mt5.ORDER_FILLING_RETURN)
+        else:
+            filling_candidates = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+
+        ordered_modes = []
+        for m in filling_candidates:
+            if m not in ordered_modes:
+                ordered_modes.append(m)
+
+        last_result = None
+        for fill_mode in ordered_modes:
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": position.symbol,
+                "volume": float(close_volume),
+                "type": order_type,
+                "position": position.ticket,
+                "price": float(price),
+                "deviation": 20,
+                "magic": 0,
+                "comment": "Journal AutoClose",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": fill_mode,
+            }
+            last_result = mt5.order_send(request)
+            if last_result and last_result.retcode == mt5.TRADE_RETCODE_DONE:
+                return {"status": "success", "result": last_result._asdict()}
+            # If rejected specifically for unsupported filling mode (10030), try next candidate
+            if last_result and last_result.retcode == 10030:
+                continue
+            break
+
+        comment = last_result.comment if last_result else "Unknown error"
+        retcode = last_result.retcode if last_result else -1
+        return {"status": "error", "message": f"Order send failed: {comment} ({retcode})"}
 
 
     # ------------------------------------------------------------------ #

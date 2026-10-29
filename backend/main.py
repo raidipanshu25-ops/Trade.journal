@@ -146,12 +146,15 @@ async def lifespan(app: FastAPI):
 
     # Background sync loop
     task = asyncio.create_task(_background_sync_loop())
+    # MT5 Auto-reconnect loop
+    reconnect_task = asyncio.create_task(_mt5_reconnect_loop())
     # MT5 Access Controller loop
     access_task = asyncio.create_task(_mt5_access_loop())
     # Database automated backup loop (runs every 6h, initial backup on start)
     backup_task = asyncio.create_task(_database_backup_loop())
     yield
     task.cancel()
+    reconnect_task.cancel()
     access_task.cancel()
     backup_task.cancel()
     # Disconnect local MT5 on shutdown
@@ -160,6 +163,25 @@ async def lifespan(app: FastAPI):
     logger.info("Backend shutdown")
 
 _history_updated_flag = False
+
+async def _mt5_reconnect_loop():
+    """Background auto-reconnect loop: checks local MT5 status every 15s and reconnects on drops."""
+    await asyncio.sleep(8)  # Initial wait for server initialization
+    while True:
+        try:
+            if MT5_MODE == "local" and _mt5_local:
+                if not _mt5_local.is_connected:
+                    reconnected = await asyncio.to_thread(_mt5_local.auto_reconnect)
+                    if reconnected:
+                        try:
+                            _mt5_access._open_mt5()
+                        except Exception:
+                            pass
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.debug(f"Auto-reconnect loop error: {e}")
+        await asyncio.sleep(15)
 
 async def _database_backup_loop():
     """Automated SQLite backup: runs on startup and every 6 hours."""
@@ -775,7 +797,18 @@ async def start_session_or_reconnect(request: Request = None):
         pass
 
     if MT5_MODE == "sync":
-        user_sync = _get_user_sync_data(user_id) if user_id else (_sync_data[next(iter(_sync_data))] if _sync_data else None)
+        user_sync = None
+        if user_id:
+            user_sync = _get_user_sync_data(user_id)
+        elif _sync_data:
+            try:
+                first_uid = next(iter(_sync_data))
+                user_sync = _sync_data[first_uid]
+            except (StopIteration, KeyError):
+                user_sync = None
+        if not user_sync:
+            user_sync = _get_user_sync_data(1)
+
         agent_ws = user_sync.get("ws") if user_sync else None
         if agent_ws:
             try:
