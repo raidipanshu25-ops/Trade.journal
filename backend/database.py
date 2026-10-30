@@ -193,7 +193,9 @@ def init_db():
                 email TEXT UNIQUE,
                 password_hash TEXT,
                 role TEXT DEFAULT 'user',
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                sync_token TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS mt5_accounts (
@@ -313,7 +315,9 @@ def _init_pg_tables(cursor):
             email TEXT UNIQUE,
             password_hash TEXT,
             role TEXT DEFAULT 'user',
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            status TEXT DEFAULT 'active',
+            sync_token TEXT DEFAULT ''
         )""",
         """CREATE TABLE IF NOT EXISTS mt5_accounts (
             id SERIAL PRIMARY KEY,
@@ -451,6 +455,13 @@ def _migrate_auth_tables():
         ("status", "TEXT DEFAULT 'active'"),
     ]:
         _safe_add_column(conn, cursor, "users", col, typedef)
+    try:
+        cursor.execute("UPDATE users SET status = 'active' WHERE status IS NULL OR status = ''")
+        conn.commit()
+    except Exception:
+        if _use_pg:
+            conn.rollback()
+
     # Create sessions table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
@@ -1935,8 +1946,8 @@ def create_user(username: str, email: str, password_hash: str, role: str = 'user
     cursor = conn.cursor()
     try:
         insert_sql = (
-            "INSERT INTO users (username, email, password_hash, role, created_at, sync_token) "
-            "VALUES (?, ?, ?, ?, ?, ?)"
+            "INSERT INTO users (username, email, password_hash, role, created_at, sync_token, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active')"
         )
         if _use_pg:
             insert_sql += " RETURNING id"
@@ -2140,12 +2151,20 @@ def delete_mt5_account(account_id: int) -> bool:
     return deleted
 
 
-def generate_sync_token(user_id: int) -> str:
+def generate_sync_token(user_id: int = None) -> str:
     """Generate and save a new sync token for a user."""
     import secrets
     token = secrets.token_urlsafe(32)
     conn = get_connection()
-    conn.execute("UPDATE users SET sync_token = ? WHERE id = ?", (token, user_id))
+    cursor = conn.cursor()
+    if not user_id:
+        cursor.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1")
+        row = cursor.fetchone()
+        if row:
+            user_id = row["id"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
+        else:
+            user_id = 1
+    cursor.execute("UPDATE users SET sync_token = ?, status = 'active' WHERE id = ?", (token, user_id))
     conn.commit()
     conn.close()
     return token
@@ -2154,23 +2173,33 @@ def get_user_by_sync_token(token: str):
     """Look up a user by their sync token."""
     if not token or not str(token).strip():
         return None
+    token = str(token).strip()
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE sync_token = ? AND status = 'active'", (token,))
+    cursor.execute(
+        "SELECT * FROM users WHERE sync_token = ? AND (status != 'deactivated' OR status IS NULL)",
+        (token,)
+    )
     row = cursor.fetchone()
     conn.close()
     if row:
         return dict(row)
     return None
 
-def get_sync_token(user_id: int) -> str:
+def get_sync_token(user_id: int = None) -> str:
     """Get the current sync token for a user."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT sync_token FROM users WHERE id = ?", (user_id,))
+    if not user_id:
+        cursor.execute("SELECT sync_token FROM users ORDER BY id ASC LIMIT 1")
+    else:
+        cursor.execute("SELECT sync_token FROM users WHERE id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    return row["sync_token"] if row and row["sync_token"] else ""
+    if row:
+        val = row["sync_token"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
+        return val if val else ""
+    return ""
 
 
 def backup_db(max_backups: int = 7) -> str | None:

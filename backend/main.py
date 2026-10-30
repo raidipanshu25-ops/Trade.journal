@@ -2288,7 +2288,7 @@ def _get_user_sync_data(user_id: int) -> dict:
 @app.post("/api/sync/auth")
 async def sync_auth(payload: dict = Body(...)):
     """Exchange a sync token for a JWT. Used by the local connector."""
-    sync_token = payload.get("sync_token", "")
+    sync_token = str(payload.get("sync_token", "")).strip()
     user = db.get_user_by_sync_token(sync_token) if sync_token else None
     if not user:
         # In single-user mode (ADMIN_PASSWORD not set) or local mode fallback
@@ -2322,6 +2322,20 @@ async def sync_auth(payload: dict = Body(...)):
                 pass
             return {"token": token, "username": uname, "user_id": uid}
 
+        # Case-insensitive or un-trimmed match fallback
+        try:
+            conn = db.get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM users WHERE LOWER(sync_token) = LOWER(?)", (sync_token,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                user = dict(row)
+        except Exception:
+            pass
+
+    if not user:
+        logger.warning(f"Sync auth rejected (401): No user found for sync token '{sync_token[:8] if sync_token else 'EMPTY'}...'")
         raise HTTPException(401, "Invalid sync token")
 
     token = create_access_token({
@@ -2416,9 +2430,11 @@ goto :agent_loop
 @app.get("/api/user/sync-token")
 def get_user_sync_token(user=Depends(extract_user_from_token)):
     """Get the current user's sync token. Auto-generates if missing."""
-    user_id = user.get("user_id", 0)
+    user_id = user.get("user_id") if isinstance(user, dict) else None
+    if not user_id and isinstance(user, dict):
+        user_id = user.get("id")
     token = db.get_sync_token(user_id)
-    if not token and user_id:
+    if not token:
         token = db.generate_sync_token(user_id)
     return {"sync_token": token, "has_token": bool(token)}
 
@@ -2426,7 +2442,9 @@ def get_user_sync_token(user=Depends(extract_user_from_token)):
 @app.post("/api/user/sync-token")
 def generate_user_sync_token(user=Depends(extract_user_from_token)):
     """Generate a new sync token for the current user."""
-    user_id = user.get("user_id", 0)
+    user_id = user.get("user_id") if isinstance(user, dict) else None
+    if not user_id and isinstance(user, dict):
+        user_id = user.get("id")
     token = db.generate_sync_token(user_id)
     return {"sync_token": token}
 

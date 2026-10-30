@@ -77,6 +77,7 @@ _local_http_running = False
 _current_backend_url = ""
 _current_sync_token = ""
 _current_mt5_path = ""
+_token_updated_event = asyncio.Event()
 
 def token_display(t: str) -> str:
     if not t:
@@ -315,24 +316,14 @@ async def wait_for_backend_auth(backend_url: str = "", sync_token: str = "") -> 
                     print_status(f"    OR paste your valid Sync Token below and press Enter:\n")
                     print_error(f"============================================================\n")
 
-                    if sys.stdin and sys.stdin.isatty():
-                        try:
-                            # Prompt user with non-blocking thread so HTTP server on port 18500 continues running
-                            entered = await asyncio.to_thread(input, "  Paste your Sync Token here (or press Enter to retry): ")
-                            entered = entered.strip()
-                            if entered:
-                                _current_sync_token = entered
-                                cfg = load_config()
-                                cfg["sync_token"] = _current_sync_token
-                                save_config(cfg)
-                                print_success(f"Token saved to config! Retrying with {token_display(_current_sync_token)}...")
-                                invalidate_jwt()
-                                attempt += 1
-                                continue
-                        except Exception:
-                            pass
-
-                    await asyncio.sleep(6)
+                    try:
+                        await asyncio.wait_for(_token_updated_event.wait(), timeout=6.0)
+                        _token_updated_event.clear()
+                        print_success(f"⚡ Token updated! Retrying authentication with {token_display(_current_sync_token)}...")
+                        attempt = 1
+                        continue
+                    except asyncio.TimeoutError:
+                        pass
                 else:
                     print_warning(f"Backend HTTP {e.response.status_code}. Waiting for backend to wake up... Retrying in {delay}s.")
                     await asyncio.sleep(delay)
@@ -779,6 +770,7 @@ async def run_local_http_server(mt5_path: str = ""):
                         cfg["backend_url"] = _current_backend_url
                     save_config(cfg)
                     invalidate_jwt()
+                    _token_updated_event.set()
                     print_success(f"⚡ Dashboard pushed new Sync Token: {token_display(_current_sync_token)}")
                     resp = {"ok": True, "message": "Sync token updated successfully", "token": token_display(_current_sync_token)}
                 else:
@@ -801,6 +793,7 @@ async def run_local_http_server(mt5_path: str = ""):
                             cfg["sync_token"] = _current_sync_token
                             save_config(cfg)
                             invalidate_jwt()
+                            _token_updated_event.set()
                             print_success(f"⚡ Session start updated Sync Token: {token_display(_current_sync_token)}")
                     except Exception:
                         pass
