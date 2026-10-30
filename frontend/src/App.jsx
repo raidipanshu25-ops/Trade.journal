@@ -178,7 +178,10 @@ function App() {
       const localPing = await api.pingLocalConnector();
       if (localPing && localPing.ok) {
         setSessionMessage('Local agent active! Launching MT5...');
-        await api.startLocalSession();
+        if (syncToken) {
+          await api.syncTokenToLocalConnector(syncToken, window.location.origin);
+        }
+        await api.startLocalSession({ sync_token: syncToken, backend_url: window.location.origin });
         await api.startSession();
         setTimeout(() => {
           setSessionStarting(false);
@@ -190,7 +193,7 @@ function App() {
 
       // 3. Launch via registered Windows protocol handler (tjconnector://start)
       setSessionMessage('Launching MT5 Connector on your PC...');
-      api.launchConnectorProtocol();
+      api.launchConnectorProtocol(syncToken, window.location.origin);
 
       // Poll port 18500 for up to 6 seconds to detect the newly started connector
       let detected = false;
@@ -200,7 +203,10 @@ function App() {
         if (ping && ping.ok) {
           detected = true;
           setSessionMessage('Connector detected! Connecting MT5...');
-          await api.startLocalSession();
+          if (syncToken) {
+            await api.syncTokenToLocalConnector(syncToken, window.location.origin);
+          }
+          await api.startLocalSession({ sync_token: syncToken, backend_url: window.location.origin });
           await api.startSession();
           break;
         }

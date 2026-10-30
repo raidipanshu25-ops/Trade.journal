@@ -194,3 +194,4 @@ echo   - run_connector.bat    (to start the MT5 sync connector)
 echo   - start_app.bat        (to start the full-stack web application)
 echo.
 pause
+

@@ -51,6 +51,27 @@ function ConnectorTokenSection() {
     }
   };
 
+  const [syncingConnector, setSyncingConnector] = useState(false);
+  const [syncConnectorMsg, setSyncConnectorMsg] = useState('');
+
+  const handleSyncToConnector = async () => {
+    if (!token) return;
+    setSyncingConnector(true);
+    setSyncConnectorMsg('Sending...');
+    try {
+      const res = await api.syncTokenToLocalConnector(token, window.location.origin);
+      if (res && res.ok) {
+        setSyncConnectorMsg('✅ Synced to Agent!');
+      } else {
+        setSyncConnectorMsg('⚠️ Agent offline on PC');
+      }
+    } catch (_) {
+      setSyncConnectorMsg('⚠️ Connection failed');
+    }
+    setSyncingConnector(false);
+    setTimeout(() => setSyncConnectorMsg(''), 4000);
+  };
+
   const handleRegenerate = async () => {
     setRegenerating(true);
     try {
@@ -152,6 +173,15 @@ function ConnectorTokenSection() {
           style={{ fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
         >
           <span>📥</span> {downloading ? 'Downloading...' : 'Download Connector (.zip)'}
+        </button>
+        <button 
+          onClick={handleSyncToConnector} 
+          disabled={syncingConnector || !token}
+          className="btn btn-secondary"
+          style={{ fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+          title="Push this token directly to the connector running on this PC (port 18500)"
+        >
+          <span>⚡</span> {syncConnectorMsg || 'Sync with Local Connector'}
         </button>
         <span style={{ color: 'var(--text-2)', fontSize: '0.72rem', fontFamily: 'var(--mono)', width: '100%', marginTop: '4px' }}>
           {hasToken ? 'Regenerating will invalidate the old token.' : 'Generate a token to connect your local MT5 agent.'}

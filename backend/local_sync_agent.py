@@ -19,7 +19,7 @@ import logging
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, unquote
 import threading
 
 logger = logging.getLogger("tj_connector")
@@ -73,6 +73,17 @@ _mt5_lock_reason = ""
 _last_known_account = None
 _backend_connected = False
 _local_http_running = False
+
+_current_backend_url = ""
+_current_sync_token = ""
+_current_mt5_path = ""
+
+def token_display(t: str) -> str:
+    if not t:
+        return "(none)"
+    if len(t) <= 10:
+        return t
+    return f"{t[:8]}...{t[-4:]}"
 
 # ── Colored console output ───────────────────────────────────────────
 class Colors:
@@ -145,6 +156,14 @@ def save_config(cfg: dict):
         CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     except Exception as e:
         logger.debug(f"Could not save config to {CONFIG_FILE}: {e}")
+
+def clear_config():
+    """Clear saved config."""
+    try:
+        if CONFIG_FILE.exists():
+            CONFIG_FILE.unlink()
+    except Exception:
+        pass
 
 def run_setup_wizard(suggested_backend: str = "https://trade-journal-ukc2.onrender.com") -> dict:
     """First-run setup wizard. Safe against EOF and never abruptly exits."""
@@ -233,15 +252,18 @@ def invalidate_jwt():
     _jwt_token = None
     _jwt_expiry = 0
 
-async def authenticate(client: httpx.AsyncClient, backend_url: str, sync_token: str) -> str:
-    global _jwt_token, _jwt_expiry
+async def authenticate(client: httpx.AsyncClient, backend_url: str = "", sync_token: str = "") -> str:
+    global _jwt_token, _jwt_expiry, _current_backend_url, _current_sync_token
+    backend_url = (backend_url or _current_backend_url or "").rstrip("/")
+    sync_token = (sync_token or _current_sync_token or "").strip()
+
     if _jwt_token and time.time() < _jwt_expiry - 30:
         return _jwt_token
 
     response = await client.post(
         f"{backend_url}/api/sync/auth",
         json={"sync_token": sync_token},
-        timeout=15.0
+        timeout=35.0
     )
     response.raise_for_status()
     data = response.json()
@@ -253,26 +275,74 @@ async def authenticate(client: httpx.AsyncClient, backend_url: str, sync_token: 
 def auth_headers() -> dict:
     return {"Authorization": f"Bearer {_jwt_token}"} if _jwt_token else {}
 
-async def wait_for_backend_auth(backend_url: str, sync_token: str) -> str:
+async def wait_for_backend_auth(backend_url: str = "", sync_token: str = "") -> str:
     """Continuously retry connecting to backend until successful (never exits on server spin-up)."""
+    global _current_backend_url, _current_sync_token
+    if backend_url:
+        _current_backend_url = backend_url.rstrip("/")
+    if sync_token:
+        _current_sync_token = sync_token.strip()
+
     delay = 3
     attempt = 1
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=35.0) as client:
         while True:
+            # Check if token in config file on disk was updated externally
             try:
-                print_status(f"Connecting to backend ({backend_url})... [Attempt {attempt}]")
-                token = await authenticate(client, backend_url, sync_token)
+                disk_cfg = load_config()
+                disk_token = disk_cfg.get("sync_token", "").strip()
+                if disk_token and disk_token != _current_sync_token and disk_token != "test_sync_token_abc123":
+                    _current_sync_token = disk_token
+                    print_status(f"Detected updated Sync Token from config: {token_display(_current_sync_token)}")
+                    invalidate_jwt()
+            except Exception:
+                pass
+
+            try:
+                print_status(f"Connecting to backend ({_current_backend_url})... [Attempt {attempt}]")
+                token = await authenticate(client, _current_backend_url, _current_sync_token)
                 return token
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (401, 403):
-                    print_error(f"Auth rejected ({e.response.status_code}): please verify your sync token in settings.")
-                    await asyncio.sleep(10)
+                    print_error(f"\n============================================================")
+                    print_error(f" [AUTH ERROR {e.response.status_code}] Invalid or Mismatched Sync Token!")
+                    print_warning(f" Target Backend:  {_current_backend_url}")
+                    print_warning(f" Rejected Token:  {token_display(_current_sync_token)}")
+                    print_status(f"\n How to fix this in 10 seconds:")
+                    print_status(f" 1. Open your dashboard in browser: {_current_backend_url}")
+                    print_status(f" 2. Go to: Settings -> MT5 Connector -> Copy Sync Token")
+                    print_status(f" 3. Click 'Sync with Local Connector' in dashboard settings,")
+                    print_status(f"    OR paste your valid Sync Token below and press Enter:\n")
+                    print_error(f"============================================================\n")
+
+                    if sys.stdin and sys.stdin.isatty():
+                        try:
+                            # Prompt user with non-blocking thread so HTTP server on port 18500 continues running
+                            entered = await asyncio.to_thread(input, "  Paste your Sync Token here (or press Enter to retry): ")
+                            entered = entered.strip()
+                            if entered:
+                                _current_sync_token = entered
+                                cfg = load_config()
+                                cfg["sync_token"] = _current_sync_token
+                                save_config(cfg)
+                                print_success(f"Token saved to config! Retrying with {token_display(_current_sync_token)}...")
+                                invalidate_jwt()
+                                attempt += 1
+                                continue
+                        except Exception:
+                            pass
+
+                    await asyncio.sleep(6)
                 else:
                     print_warning(f"Backend HTTP {e.response.status_code}. Waiting for backend to wake up... Retrying in {delay}s.")
                     await asyncio.sleep(delay)
                     delay = min(delay * 1.5, 20)
             except Exception as e:
-                print_warning(f"Backend unreachable ({e}). Render / server may be starting up. Retrying in {delay}s...")
+                err_text = str(e)
+                if "getaddrinfo" in err_text or "timeout" in err_text.lower():
+                    print_warning(f"Backend warming up / connecting ({err_text}). Retrying in {delay}s...")
+                else:
+                    print_warning(f"Backend unreachable ({err_text}). Retrying in {delay}s...")
                 await asyncio.sleep(delay)
                 delay = min(delay * 1.5, 20)
             attempt += 1
@@ -318,27 +388,6 @@ def auto_detect_mt5_path() -> str:
                     continue
     except Exception:
         pass
-
-    broker_keywords = [
-        "metatrader", "mt5", "exness", "icmarkets", "ic markets",
-        "ftmo", "pepperstone", "xm", "fbs", "avatrade", "fxpro",
-        "roboforex", "vantage", "eightcap", "funded", "terminal"
-    ]
-    for base_dir in [
-        os.environ.get("ProgramFiles", r"C:\Program Files"),
-        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-    ]:
-        base = Path(base_dir)
-        if not base.exists():
-            continue
-        try:
-            for entry in base.iterdir():
-                if entry.is_dir() and any(k in entry.name.lower() for k in broker_keywords):
-                    exe = entry / "terminal64.exe"
-                    if exe.exists():
-                        return str(exe)
-        except Exception:
-            continue
 
     for env_var in ["LOCALAPPDATA", "APPDATA"]:
         app_dir = os.environ.get(env_var, "")
@@ -394,9 +443,13 @@ def is_mt5_running() -> bool:
 
 def ensure_mt5_gui_running(mt5_path: str = "") -> bool:
     """Ensure the MT5 terminal GUI is open and visible on desktop."""
+    if is_mt5_running():
+        return True
+
     exe_path = mt5_path or auto_detect_mt5_path()
     if not exe_path or not Path(exe_path).exists():
         return False
+
     try:
         import ctypes
         import ctypes.wintypes
@@ -479,59 +532,59 @@ def connect_mt5(mt5_path=None, max_retries: int = 1) -> bool:
             except Exception:
                 pass
 
-            init_kwargs = {}
-            if mt5_path and Path(mt5_path).exists():
-                init_kwargs["path"] = mt5_path
-
-            if mt5.initialize(**init_kwargs):
-                term_info = mt5.terminal_info()
-                company = getattr(term_info, "company", "MetaQuotes") if term_info else "MetaQuotes"
-                print_success(f"Connected to MT5 terminal ({company}).")
-                if mt5_path:
-                    ensure_mt5_gui_running(mt5_path)
-                return True
+            connected = False
+            if mt5_path:
+                connected = mt5.initialize(path=mt5_path)
             else:
-                retry_count += 1
-                if max_retries and retry_count >= max_retries:
-                    return False
-                if retry_count % 3 == 0 and mt5_path:
-                    ensure_mt5_gui_running(mt5_path)
-        time.sleep(2)
+                connected = mt5.initialize()
 
-def get_account_info():
-    global _last_known_account
+            if connected:
+                info = mt5.terminal_info()
+                company = getattr(info, "company", "MetaTrader 5") if info else "MetaTrader 5"
+                print_success(f"Connected to MT5 terminal ({company}).")
+                return True
+
+            err = mt5.last_error()
+            retry_count += 1
+            if retry_count >= max_retries:
+                logger.debug(f"MT5 initialize returned False (Error: {err})")
+                return False
+
+            time.sleep(1.5)
+
+def get_account_info() -> dict:
+    """Return current MT5 account details."""
     try:
-        acc = mt5.account_info()
-        if acc is None:
+        info = mt5.account_info()
+        if not info:
             return None
-        info = {
-            "balance": acc.balance,
-            "equity": acc.equity,
-            "margin": acc.margin,
-            "free_margin": acc.margin_free,
-            "profit": acc.profit,
-            "leverage": acc.leverage,
-            "currency": acc.currency,
-            "server": acc.server,
-            "name": acc.name,
-            "login": acc.login,
+        return {
+            "login": info.login,
+            "broker": info.company,
+            "server": info.server,
+            "currency": info.currency,
+            "balance": info.balance,
+            "equity": info.equity,
+            "profit": info.profit,
+            "margin": info.margin,
+            "margin_free": info.margin_free,
+            "margin_level": getattr(info, "margin_level", 0.0),
+            "leverage": info.leverage,
         }
-        _last_known_account = info
-        return info
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error reading account info: {e}")
         return None
 
-def get_open_positions():
+def get_open_positions() -> list:
+    """Return all currently open positions in MT5."""
     try:
         positions = mt5.positions_get()
         if positions is None:
             return []
-
         result = []
-        now = datetime.now(timezone.utc)
         for p in positions:
-            open_time = datetime.fromtimestamp(p.time, tz=timezone.utc)
-            duration_minutes = (now - open_time).total_seconds() / 60.0
+            open_dt = datetime.fromtimestamp(p.time, tz=timezone.utc)
+            duration_minutes = (datetime.now(timezone.utc) - open_dt).total_seconds() / 60.0
             result.append({
                 "ticket": p.ticket,
                 "symbol": p.symbol,
@@ -539,29 +592,27 @@ def get_open_positions():
                 "volume": p.volume,
                 "open_price": p.price_open,
                 "current_price": p.price_current,
-                "profit": p.profit,
                 "sl": p.sl,
                 "tp": p.tp,
+                "profit": p.profit,
+                "swap": p.swap,
+                "open_time": open_dt.astimezone().isoformat(),
                 "duration_minutes": duration_minutes,
                 "comment": p.comment,
-                "open_time": open_time.astimezone().isoformat()
             })
         return result
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error fetching open positions: {e}")
         return []
 
-def get_closed_trades():
+def get_closed_trades(lookback_days: int = 30) -> list:
+    """Fetch closed trades by matching deal IN with deal OUT."""
     global _first_sync
     try:
-        open_positions = mt5.positions_get()
-        open_pids = set(p.identifier for p in open_positions) if open_positions else set()
-
-        now = datetime.now()
-        lookback_days = 90 if _first_sync else 7
-        from_date = now - timedelta(days=lookback_days)
-        deals = mt5.history_deals_get(from_date, now)
-
-        if deals is None:
+        now = datetime.now(timezone.utc)
+        from_dt = now - timedelta(days=lookback_days if _first_sync else 3)
+        deals = mt5.history_deals_get(from_dt, now)
+        if not deals:
             return []
 
         if _first_sync:
@@ -570,33 +621,24 @@ def get_closed_trades():
         deals_by_pid = {}
         for d in deals:
             pid = d.position_id
+            if not pid or pid == 0:
+                continue
             if pid not in deals_by_pid:
-                deals_by_pid[pid] = {'in': None, 'outs': []}
+                deals_by_pid[pid] = {'ins': [], 'outs': []}
             if d.entry == 0:
-                deals_by_pid[pid]['in'] = d
-            elif d.entry in (1, 3):
+                deals_by_pid[pid]['ins'].append(d)
+            elif d.entry in (1, 2):
                 deals_by_pid[pid]['outs'].append(d)
 
         closed_trades = []
         for pid, data in deals_by_pid.items():
-            if pid in open_pids or not data['outs']:
+            if not data['ins'] or not data['outs']:
                 continue
 
-            in_deal = data['in']
-            if in_deal is None:
-                pid_deals = mt5.history_deals_get(position=pid)
-                if pid_deals:
-                    for pd in pid_deals:
-                        if pd.entry == 0:
-                            in_deal = pd
-                            break
-
-            if in_deal is None:
-                continue
-
-            profit = sum(d.profit for d in data['outs'])
-            commission = in_deal.commission + sum(d.commission for d in data['outs'])
-            swap = in_deal.swap + sum(d.swap for d in data['outs'])
+            in_deal = sorted(data['ins'], key=lambda x: x.time)[0]
+            profit = sum(d.profit for d in data['outs']) + sum(d.profit for d in data['ins'])
+            commission = sum(d.commission for d in data['ins'] + data['outs'])
+            swap = sum(d.swap for d in data['ins'] + data['outs'])
 
             open_time = datetime.fromtimestamp(in_deal.time, tz=timezone.utc)
             last_out = sorted(data['outs'], key=lambda x: x.time)[-1]
@@ -640,11 +682,11 @@ def get_closed_trades():
 
 # ── Local HTTP Server (Port 18500) for Dashboard 1-Click Connect ─────
 async def run_local_http_server(mt5_path: str = ""):
-    """Tiny local HTTP server allowing the browser to trigger session connect with 1 click."""
+    """Tiny local HTTP server allowing the browser to trigger session connect & sync tokens."""
     global _local_http_running
 
     async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        global _mt5_locked_by_rules, _mt5_lock_reason
+        global _mt5_locked_by_rules, _mt5_lock_reason, _current_sync_token, _current_backend_url
         try:
             request_line = await reader.readline()
             if not request_line:
@@ -693,17 +735,79 @@ async def run_local_http_server(mt5_path: str = ""):
                     "mt5_open": is_mt5_running(),
                     "locked_by_rules": _mt5_locked_by_rules,
                     "lock_reason": _mt5_lock_reason,
+                    "backend_url": _current_backend_url,
+                    "has_token": bool(_current_sync_token and _current_sync_token != "test_sync_token_abc123"),
+                    "token_display": token_display(_current_sync_token),
+                    "authenticated": bool(_jwt_token),
                     "status": "locked" if _mt5_locked_by_rules else ("active" if is_mt5_running() else "ready")
                 }
                 body = json.dumps(resp)
                 writer.write((cors_headers + body).encode('utf-8'))
                 await writer.drain()
 
+            elif path.startswith("/set-token") or path.startswith("/update-config") or path.startswith("/sync-token"):
+                content_len = int(headers.get("content-length", 0))
+                body_bytes = b""
+                if content_len > 0:
+                    body_bytes = await reader.readexactly(content_len)
+
+                new_token = ""
+                new_backend = ""
+                try:
+                    if body_bytes:
+                        data = json.loads(body_bytes.decode('utf-8', errors='ignore'))
+                        new_token = data.get("sync_token") or data.get("token") or ""
+                        new_backend = data.get("backend_url") or data.get("backend") or ""
+                except Exception:
+                    pass
+
+                # Check query string
+                if "?" in path:
+                    parsed_path = urlparse(path)
+                    qs = parse_qs(parsed_path.query)
+                    if not new_token and ("token" in qs or "sync_token" in qs):
+                        new_token = (qs.get("sync_token") or qs.get("token"))[0]
+                    if not new_backend and ("backend" in qs or "backend_url" in qs):
+                        new_backend = (qs.get("backend_url") or qs.get("backend"))[0]
+
+                if new_token:
+                    _current_sync_token = new_token.strip()
+                    cfg = load_config()
+                    cfg["sync_token"] = _current_sync_token
+                    if new_backend:
+                        _current_backend_url = new_backend.strip().rstrip("/")
+                        cfg["backend_url"] = _current_backend_url
+                    save_config(cfg)
+                    invalidate_jwt()
+                    print_success(f"⚡ Dashboard pushed new Sync Token: {token_display(_current_sync_token)}")
+                    resp = {"ok": True, "message": "Sync token updated successfully", "token": token_display(_current_sync_token)}
+                else:
+                    resp = {"ok": False, "message": "No sync_token provided"}
+
+                writer.write((cors_headers + json.dumps(resp)).encode('utf-8'))
+                await writer.drain()
+
             elif path.startswith("/start-session") or path.startswith("/connect"):
+                # Check if token was included in body
+                content_len = int(headers.get("content-length", 0))
+                if content_len > 0:
+                    try:
+                        body_bytes = await reader.readexactly(content_len)
+                        data = json.loads(body_bytes.decode('utf-8', errors='ignore'))
+                        tok = data.get("sync_token") or data.get("token")
+                        if tok and tok.strip() and tok.strip() != _current_sync_token:
+                            _current_sync_token = tok.strip()
+                            cfg = load_config()
+                            cfg["sync_token"] = _current_sync_token
+                            save_config(cfg)
+                            invalidate_jwt()
+                            print_success(f"⚡ Session start updated Sync Token: {token_display(_current_sync_token)}")
+                    except Exception:
+                        pass
+
                 print_status("Dashboard requested: START SESSION & CONNECT MT5.")
                 _mt5_locked_by_rules = False
                 _mt5_lock_reason = ""
-                # Connect MT5 asynchronously
                 asyncio.create_task(asyncio.to_thread(connect_mt5, mt5_path, 1))
                 resp = {"ok": True, "message": "Connecting MT5 terminal..."}
                 writer.write((cors_headers + json.dumps(resp)).encode('utf-8'))
@@ -740,13 +844,16 @@ async def run_local_http_server(mt5_path: str = ""):
         print_warning(f"Could not bind 127.0.0.1:18500 (port busy): {e}")
 
 # ── Bulk Sync Loop (Every 60s) ────────────────────────────────────────
-async def bulk_sync_loop(backend_url: str, sync_token: str, mt5_path: str = ""):
+async def bulk_sync_loop(backend_url: str = "", sync_token: str = "", mt5_path: str = ""):
     """Every 60s: push account, positions, and closed trades via HTTP."""
+    global _first_sync, _current_backend_url, _current_sync_token
     print_status("Bulk sync loop active (every 60s)...")
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=35.0) as client:
         while True:
+            target_url = _current_backend_url or backend_url
+            target_token = _current_sync_token or sync_token
             try:
-                token = await authenticate(client, backend_url, sync_token)
+                token = await authenticate(client, target_url, target_token)
 
                 mt5_open = is_mt5_running()
                 if mt5_open and not _mt5_locked_by_rules:
@@ -758,7 +865,7 @@ async def bulk_sync_loop(backend_url: str, sync_token: str, mt5_path: str = ""):
                     closed_trades = await asyncio.to_thread(get_closed_trades)
 
                     response = await client.post(
-                        f"{backend_url}/api/sync/push",
+                        f"{target_url}/api/sync/push",
                         json={
                             "account": account,
                             "positions": positions,
@@ -777,7 +884,7 @@ async def bulk_sync_loop(backend_url: str, sync_token: str, mt5_path: str = ""):
                 else:
                     # Push connector heartbeat even when MT5 is closed
                     await client.post(
-                        f"{backend_url}/api/sync/push",
+                        f"{target_url}/api/sync/push",
                         json={
                             "account": _last_known_account,
                             "positions": [],
@@ -794,7 +901,7 @@ async def bulk_sync_loop(backend_url: str, sync_token: str, mt5_path: str = ""):
                 if e.response.status_code in (401, 403):
                     invalidate_jwt()
                     try:
-                        await authenticate(client, backend_url, sync_token)
+                        await authenticate(client, target_url, target_token)
                     except Exception:
                         pass
                 else:
@@ -805,19 +912,21 @@ async def bulk_sync_loop(backend_url: str, sync_token: str, mt5_path: str = ""):
             await asyncio.sleep(60)
 
 # ── Live Stream Loop (Every 2s via WebSocket) ─────────────────────────
-async def live_stream_loop(backend_url: str, sync_token: str, mt5_path: str = ""):
+async def live_stream_loop(backend_url: str = "", sync_token: str = "", mt5_path: str = ""):
     """Stream live prices or heartbeats via WebSocket, and receive backend commands."""
-    global _mt5_locked_by_rules, _mt5_lock_reason, _backend_connected
+    global _mt5_locked_by_rules, _mt5_lock_reason, _backend_connected, _current_backend_url, _current_sync_token
 
-    parsed = urlparse(backend_url)
-    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
-    http_client = httpx.AsyncClient(timeout=10.0)
-
+    http_client = httpx.AsyncClient(timeout=15.0)
     print_status("Live stream loop active (every 2s)...")
 
     while True:
+        target_url = _current_backend_url or backend_url
+        target_token = _current_sync_token or sync_token
+        parsed = urlparse(target_url)
+        ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+
         try:
-            token = await authenticate(http_client, backend_url, sync_token)
+            token = await authenticate(http_client, target_url, target_token)
             ws_url = f"{ws_scheme}://{parsed.netloc}/ws/sync/agent?token={token}"
 
             async with websockets.connect(
@@ -848,64 +957,57 @@ async def live_stream_loop(backend_url: str, sync_token: str, mt5_path: str = ""
                                         "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
                                         "account": account,
                                         "positions": positions,
+                                        "connector_online": True,
                                         "mt5_open": True,
-                                        "connector_online": True,
+                                        "status": "active",
                                     }))
-                                else:
-                                    await websocket.send(json.dumps({
-                                        "type": "heartbeat",
-                                        "connector_online": True,
-                                        "mt5_open": False,
-                                        "status": "ready",
-                                        "account": _last_known_account,
-                                        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
-                                    }))
+                                    _last_known_account = account
                             else:
-                                # MT5 is closed (locked by rules or out of session)
-                                # Crucial: connector remains established!
                                 await websocket.send(json.dumps({
                                     "type": "heartbeat",
+                                    "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
                                     "connector_online": True,
                                     "mt5_open": False,
-                                    "status": "locked" if _mt5_locked_by_rules else "waiting_for_session",
-                                    "lock_reason": _mt5_lock_reason or ("Outside of active trading session" if not mt5_running else ""),
-                                    "account": _last_known_account,
-                                    "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+                                    "status": "locked" if _mt5_locked_by_rules else "waiting",
+                                    "lock_reason": _mt5_lock_reason,
+                                    "account": _last_known_account
                                 }))
 
                         except Exception as e:
-                            logger.debug(f"Sender tick error: {e}")
+                            logger.debug(f"Sender notice: {e}")
+                            break
+
                         await asyncio.sleep(2)
 
-                # Receiver coroutine for dashboard commands
+                # Receiver coroutine
                 async def receiver_task():
                     global _mt5_locked_by_rules, _mt5_lock_reason
                     while True:
                         try:
                             msg_str = await websocket.recv()
-                            cmd = json.loads(msg_str)
-                            action = cmd.get("action", "")
+                            msg = json.loads(msg_str)
+                            cmd = msg.get("action")
 
-                            if action in ("start_session", "open_mt5"):
-                                print_status("⚡ Dashboard command received: START SESSION & OPEN MT5.")
+                            if cmd == "start_session":
+                                print_status("⚡ Dashboard command received: START SESSION.")
                                 _mt5_locked_by_rules = False
                                 _mt5_lock_reason = ""
-                                await asyncio.to_thread(connect_mt5, mt5_path, 1)
+                                await asyncio.to_thread(connect_mt5, mt5_path, 2)
 
-                            elif action == "close_mt5":
-                                reason = cmd.get("reason", "Discipline rule violation")
-                                print_warning(f"🔒 [DISCIPLINE RULE ENFORCED] {reason}")
-                                print_status("MT5 terminal closed to preserve discipline. Connection remains established.")
+                            elif cmd == "lock_mt5":
+                                reason = msg.get("reason", "Discipline rule triggered")
+                                print_warning(f"🔒 Discipline enforcement: {reason}")
                                 _mt5_locked_by_rules = True
                                 _mt5_lock_reason = reason
                                 await asyncio.to_thread(force_close_mt5)
 
-                            elif action == "unlock":
-                                print_status("Discipline unlock command received.")
+                            elif cmd == "unlock_mt5":
+                                print_status("🔓 Discipline gate cleared. MT5 unlocked.")
                                 _mt5_locked_by_rules = False
                                 _mt5_lock_reason = ""
 
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Receiver notice: {e}")
                             break
 
                 await asyncio.gather(sender_task(), receiver_task())
@@ -927,21 +1029,69 @@ async def live_stream_loop(backend_url: str, sync_token: str, mt5_path: str = ""
 
 # ── Main ─────────────────────────────────────────────────────────────
 async def main():
+    global _current_backend_url, _current_sync_token, _current_mt5_path
+
     print(f"\n{Colors.HEADER}{'='*60}")
     print("  MT5 Trading Journal — Local Connector (v2.0)")
     print(f"{'='*60}{Colors.ENDC}\n")
 
-    # Load from any available .env files
+    # 1. Parse CLI arguments: --token, --backend, --reset, tjconnector://
+    cli_token = ""
+    cli_backend = ""
+    cli_mt5_path = ""
+    reset_requested = False
+
+    for arg in sys.argv[1:]:
+        if arg.startswith("tjconnector://"):
+            try:
+                p = urlparse(arg)
+                qs = parse_qs(p.query)
+                if "token" in qs and qs["token"]:
+                    cli_token = qs["token"][0].strip()
+                if "backend" in qs and qs["backend"]:
+                    cli_backend = qs["backend"][0].strip().rstrip("/")
+                if "path" in qs and qs["path"]:
+                    cli_mt5_path = qs["path"][0].strip()
+            except Exception:
+                pass
+
+    i = 1
+    while i < len(sys.argv):
+        a = sys.argv[i].lower()
+        if a in ("--token", "-t", "/token") and i + 1 < len(sys.argv):
+            cli_token = sys.argv[i + 1].strip()
+            i += 2
+        elif a in ("--backend", "-b", "/backend") and i + 1 < len(sys.argv):
+            cli_backend = sys.argv[i + 1].strip().rstrip("/")
+            i += 2
+        elif a in ("--path", "-p", "/path") and i + 1 < len(sys.argv):
+            cli_mt5_path = sys.argv[i + 1].strip()
+            i += 2
+        elif a in ("--reset", "--config", "--wizard", "/reset"):
+            reset_requested = True
+            i += 1
+        else:
+            i += 1
+
+    if reset_requested:
+        clear_config()
+        print_status("Configuration cleared from disk.")
+
+    # 2. Load from any available .env files
     load_all_env_sources()
 
-    backend_url = (os.environ.get("RENDER_BACKEND_URL") or os.environ.get("BACKEND_URL") or "").strip()
-    sync_token = (os.environ.get("SYNC_TOKEN") or os.environ.get("SYNC_API_KEY") or "").strip()
-    mt5_path = (os.environ.get("MT5_PATH") or "").strip() or None
+    env_backend = (os.environ.get("RENDER_BACKEND_URL") or os.environ.get("BACKEND_URL") or "").strip()
+    env_token = (os.environ.get("SYNC_TOKEN") or os.environ.get("SYNC_API_KEY") or "").strip()
+    env_mt5 = (os.environ.get("MT5_PATH") or "").strip() or None
 
     cfg = load_config()
-    backend_url = backend_url or cfg.get("backend_url", "").strip()
-    sync_token = sync_token or cfg.get("sync_token", "").strip()
-    mt5_path = mt5_path or cfg.get("mt5_path")
+    backend_url = cli_backend or env_backend or cfg.get("backend_url", "").strip()
+    sync_token = cli_token or env_token or cfg.get("sync_token", "").strip()
+    mt5_path = cli_mt5_path or env_mt5 or cfg.get("mt5_path")
+
+    # Clear outdated dummy test token
+    if sync_token == "test_sync_token_abc123":
+        sync_token = ""
 
     # Auto-detect local backend if not specified
     if not backend_url:
@@ -964,18 +1114,28 @@ async def main():
         else:
             sync_token = "local"
 
-    token_display = sync_token if len(sync_token) <= 10 else f"{sync_token[:8]}...{sync_token[-4:]}"
-    print_status(f"Backend Target: {backend_url}")
-    print_status(f"Sync Token:     {token_display}")
+    _current_backend_url = backend_url.rstrip("/")
+    _current_sync_token = sync_token
+    _current_mt5_path = mt5_path
+
+    # Save active config
+    save_config({
+        "backend_url": _current_backend_url,
+        "sync_token": _current_sync_token,
+        "mt5_path": _current_mt5_path,
+    })
+
+    print_status(f"Backend Target: {_current_backend_url}")
+    print_status(f"Sync Token:     {token_display(_current_sync_token)}")
 
     # Register protocol handler so browser can 1-click launch
     register_protocol_handler()
 
-    # Launch local HTTP server for instant 1-click connect from web browser
-    asyncio.create_task(run_local_http_server(mt5_path or ""))
+    # Launch local HTTP server for instant 1-click connect & token push from browser
+    asyncio.create_task(run_local_http_server(_current_mt5_path or ""))
 
-    # Resilient authentication loop — never dies even if backend is asleep
-    await wait_for_backend_auth(backend_url, sync_token)
+    # Resilient authentication loop — never dies even if backend is asleep or token is wrong
+    await wait_for_backend_auth(_current_backend_url, _current_sync_token)
 
     # Check if launched via protocol command (e.g. tjconnector://start-session)
     args_str = " ".join(sys.argv).lower()
@@ -983,18 +1143,18 @@ async def main():
 
     if auto_connect:
         print_status("⚡ Dashboard protocol trigger received: starting session immediately...")
-        asyncio.create_task(asyncio.to_thread(connect_mt5, mt5_path, 3))
+        asyncio.create_task(asyncio.to_thread(connect_mt5, _current_mt5_path, 3))
     elif is_mt5_running():
         print_status("Detected active MetaTrader 5 process. Connecting...")
-        asyncio.create_task(asyncio.to_thread(connect_mt5, mt5_path, 1))
+        asyncio.create_task(asyncio.to_thread(connect_mt5, _current_mt5_path, 1))
     else:
         print_status("MetaTrader 5 terminal is not running yet.")
         print_status("Connector is online and ready — click 'Start Session' in your dashboard to connect.")
 
     try:
         await asyncio.gather(
-            bulk_sync_loop(backend_url, sync_token, mt5_path or ""),
-            live_stream_loop(backend_url, sync_token, mt5_path or "")
+            bulk_sync_loop(_current_backend_url, _current_sync_token, _current_mt5_path or ""),
+            live_stream_loop(_current_backend_url, _current_sync_token, _current_mt5_path or "")
         )
     except asyncio.CancelledError:
         print_warning("Shutting down gracefully...")

@@ -162,19 +162,44 @@ export const api = {
     } catch (_) {}
     return { ok: false, connector_running: false };
   },
-  startLocalSession: async () => {
+  startLocalSession: async (options = {}) => {
     try {
       const res = await fetch('http://127.0.0.1:18500/start-session', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options),
         mode: 'cors',
       });
       if (res.ok) return await res.json();
     } catch (_) {}
     return { ok: false };
   },
-  launchConnectorProtocol: () => {
+  syncTokenToLocalConnector: async (syncToken, backendUrl) => {
     try {
-      window.location.href = 'tjconnector://start';
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch('http://127.0.0.1:18500/set-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sync_token: syncToken,
+          backend_url: backendUrl || window.location.origin,
+        }),
+        signal: controller.signal,
+        mode: 'cors',
+      });
+      clearTimeout(id);
+      if (res.ok) return await res.json();
+    } catch (_) {}
+    return { ok: false };
+  },
+  launchConnectorProtocol: (syncToken, backendUrl) => {
+    try {
+      const q = new URLSearchParams();
+      if (syncToken) q.append('token', syncToken);
+      if (backendUrl) q.append('backend', backendUrl);
+      const qs = q.toString();
+      window.location.href = `tjconnector://start${qs ? `?${qs}` : ''}`;
       return true;
     } catch (_) {
       return false;
