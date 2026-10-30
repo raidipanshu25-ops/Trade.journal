@@ -317,7 +317,7 @@ async def wait_for_backend_auth(backend_url: str = "", sync_token: str = "") -> 
                     print_error(f"============================================================\n")
 
                     try:
-                        await asyncio.wait_for(_token_updated_event.wait(), timeout=6.0)
+                        await asyncio.wait_for(_token_updated_event.wait(), timeout=30.0)
                         _token_updated_event.clear()
                         print_success(f"⚡ Token updated! Retrying authentication with {token_display(_current_sync_token)}...")
                         attempt = 1
@@ -1021,6 +1021,43 @@ async def live_stream_loop(backend_url: str = "", sync_token: str = "", mt5_path
         await asyncio.sleep(5)
 
 # ── Main ─────────────────────────────────────────────────────────────
+# -- Stdin Token Reader --------------------------------------------------------
+def _start_stdin_reader():
+    """Background thread that reads pasted sync tokens from the console.
+
+    When the user pastes a token and presses Enter, the token is applied
+    immediately, saved to config.json, and the auth retry loop is woken up.
+    This runs as a daemon thread so it never blocks shutdown.
+    """
+    def _reader():
+        global _current_sync_token
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break  # EOF / stdin closed (non-interactive)
+                token = line.strip()
+                if not token or token == _current_sync_token:
+                    continue
+                _current_sync_token = token
+                cfg = load_config()
+                cfg["sync_token"] = _current_sync_token
+                save_config(cfg)
+                invalidate_jwt()
+                # asyncio.Event.set() is not thread-safe; schedule it on the event loop
+                try:
+                    loop = asyncio.get_event_loop()
+                    loop.call_soon_threadsafe(_token_updated_event.set)
+                except Exception:
+                    _token_updated_event.set()  # fallback
+                print_success(f"Token updated from console input: {token_display(_current_sync_token)}")
+            except Exception:
+                break  # stdin not readable (e.g. running as service)
+
+    if sys.stdin and sys.stdin.isatty():
+        t = threading.Thread(target=_reader, daemon=True, name="stdin-token-reader")
+        t.start()
+
 async def main():
     global _current_backend_url, _current_sync_token, _current_mt5_path
 
@@ -1111,12 +1148,10 @@ async def main():
     _current_sync_token = sync_token
     _current_mt5_path = mt5_path
 
-    # Save active config
-    save_config({
-        "backend_url": _current_backend_url,
-        "sync_token": _current_sync_token,
-        "mt5_path": _current_mt5_path,
-    })
+    # NOTE: Do NOT save config here — wait until authentication succeeds.
+    # Saving now would overwrite config.json with a potentially stale token
+    # before we've confirmed it works, clobbering any manual edits the user
+    # may have made while the connector was stopped.
 
     print_status(f"Backend Target: {_current_backend_url}")
     print_status(f"Sync Token:     {token_display(_current_sync_token)}")
@@ -1127,8 +1162,18 @@ async def main():
     # Launch local HTTP server for instant 1-click connect & token push from browser
     asyncio.create_task(run_local_http_server(_current_mt5_path or ""))
 
+    # Start background thread to read stdin for pasted sync tokens
+    _start_stdin_reader()
+
     # Resilient authentication loop — never dies even if backend is asleep or token is wrong
     await wait_for_backend_auth(_current_backend_url, _current_sync_token)
+
+    # Auth succeeded — NOW save the working config to disk so it persists
+    save_config({
+        "backend_url": _current_backend_url,
+        "sync_token": _current_sync_token,
+        "mt5_path": _current_mt5_path,
+    })
 
     # Check if launched via protocol command (e.g. tjconnector://start-session)
     args_str = " ".join(sys.argv).lower()

@@ -2152,7 +2152,11 @@ def delete_mt5_account(account_id: int) -> bool:
 
 
 def generate_sync_token(user_id: int = None) -> str:
-    """Generate and save a new sync token for a user."""
+    """Generate and save a new sync token for a user.
+
+    Returns the token on success, or empty string if the user row
+    does not exist (e.g. DB was wiped after a cloud deploy).
+    """
     import secrets
     token = secrets.token_urlsafe(32)
     conn = get_connection()
@@ -2163,10 +2167,20 @@ def generate_sync_token(user_id: int = None) -> str:
         if row:
             user_id = row["id"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
         else:
-            user_id = 1
+            # No users in database at all - cannot store the token
+            conn.close()
+            return ""
     cursor.execute("UPDATE users SET sync_token = ?, status = 'active' WHERE id = ?", (token, user_id))
+    rows_affected = cursor.rowcount
     conn.commit()
     conn.close()
+    if rows_affected == 0:
+        # The UPDATE matched no rows - user_id does not exist in the DB
+        _log.warning(
+            "generate_sync_token: user_id=%s does not exist in the "
+            "database (DB may have been wiped). Token was NOT stored.", user_id
+        )
+        return ""
     return token
 
 def get_user_by_sync_token(token: str):

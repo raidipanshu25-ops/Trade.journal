@@ -2427,6 +2427,36 @@ goto :agent_loop
     return buf.getvalue()
 
 
+def _ensure_user_row(jwt_payload: dict) -> int:
+    """Re-create a user row from the JWT payload when the DB was wiped.
+
+    On ephemeral-disk hosts (Render, Railway, etc.) a deploy wipes
+    SQLite, but the JWT the browser cached is still valid (stateless).
+    This helper re-creates the user row so sync-token generation
+    has somewhere to write.  Returns the user_id.
+    """
+    username = jwt_payload.get("sub", "admin")
+    user_id  = jwt_payload.get("user_id", 1)
+    role     = jwt_payload.get("role", "user")
+
+    # Check if the row already exists (by username first, then by id)
+    existing = db.get_user_by_username(username)
+    if existing:
+        return existing["id"]
+
+    # Re-create the user row with a placeholder email and SSO password
+    email = f"{username}@restored"
+    try:
+        new_id = db.create_user(username, email, "sso", role)
+        logger.info(
+            "Re-created user row for '%s' (id=%s) after DB wipe.", username, new_id
+        )
+        return new_id
+    except Exception as e:
+        logger.warning("Failed to re-create user '%s': %s", username, e)
+        return user_id
+
+
 @app.get("/api/user/sync-token")
 def get_user_sync_token(user=Depends(extract_user_from_token)):
     """Get the current user's sync token. Auto-generates if missing."""
@@ -2435,6 +2465,10 @@ def get_user_sync_token(user=Depends(extract_user_from_token)):
         user_id = user.get("id")
     token = db.get_sync_token(user_id)
     if not token:
+        token = db.generate_sync_token(user_id)
+    if not token:
+        # User row is gone (DB wiped on deploy) — re-create it from the JWT
+        user_id = _ensure_user_row(user)
         token = db.generate_sync_token(user_id)
     return {"sync_token": token, "has_token": bool(token)}
 
@@ -2446,6 +2480,10 @@ def generate_user_sync_token(user=Depends(extract_user_from_token)):
     if not user_id and isinstance(user, dict):
         user_id = user.get("id")
     token = db.generate_sync_token(user_id)
+    if not token:
+        # User row is gone (DB wiped on deploy) — re-create it from the JWT
+        user_id = _ensure_user_row(user)
+        token = db.generate_sync_token(user_id)
     return {"sync_token": token}
 
 
@@ -2462,6 +2500,10 @@ def download_connector(token: str = None, request: Request = None):
             user_id = user.get("user_id", 0)
             db_token = db.get_sync_token(user_id)
             if not db_token and user_id:
+                db_token = db.generate_sync_token(user_id)
+            if not db_token and user_id:
+                # User row gone after DB wipe — re-create from JWT
+                user_id = _ensure_user_row(user)
                 db_token = db.generate_sync_token(user_id)
             if db_token:
                 sync_token = db_token
